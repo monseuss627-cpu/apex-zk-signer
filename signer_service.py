@@ -35,15 +35,13 @@ async def load_sdk():
         logger.info("zklink_sdk loaded successfully")
     except Exception as e:
         logger.error(f"Primary import failed: {e}")
-        # Try loading the .so directly and patching
         try:
-            import ctypes, glob, importlib
+            import ctypes, glob
             so_files = glob.glob("/usr/local/lib/python3.11/site-packages/apexpro/libzklink_sdk*so*")
             if so_files:
                 logger.info(f"Found .so files: {so_files}")
                 ctypes.cdll.LoadLibrary(so_files[0])
                 logger.info("Native library loaded directly")
-                # Now retry the import
                 from apexpro import zklink_sdk as sdk
                 zklink_sdk = sdk
                 logger.info("zklink_sdk loaded on retry")
@@ -85,13 +83,13 @@ def _verify_token(token: str):
 
 
 def _string_to_base64(s: str) -> str:
-    return base64.urlsafe_b64encode(s.encode()).decode()
+    return base64.standard_b64encode(s.encode()).decode()
 
 
 def _hmac_sign(message: str, secret: str) -> str:
     key = _string_to_base64(secret).encode()
     sig = hmac.new(key, message.encode(), hashlib.sha256).digest()
-    return base64.urlsafe_b64encode(sig).decode()
+    return base64.standard_b64encode(sig).decode()
 
 
 def _get_zk_signer(seeds: str):
