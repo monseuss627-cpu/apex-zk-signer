@@ -3,7 +3,8 @@ FROM python:3.11
 WORKDIR /app
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir ecdsa mpmath sympy eth-account
 
 # Test import but don't fail the build
 RUN python -c "from apexpro import zklink_sdk; print('OK')" 2>&1 || echo "SDK import failed at build - will retry at runtime"
