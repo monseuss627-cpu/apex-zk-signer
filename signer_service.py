@@ -30,17 +30,12 @@ APEX_API_BASE = os.environ.get("APEX_API_BASE", "https://pro.apex.exchange")
 async def load_sdk():
     global zklink_sdk
     try:
-        from apexomni import zklink_sdk as sdk
+        from apexpro import zklink_sdk as sdk
         zklink_sdk = sdk
         logger.info("zklink_sdk loaded successfully")
-    except ImportError:
-        try:
-            import apexpro.zklink_sdk as sdk
-            zklink_sdk = sdk
-            logger.info("apexpro.zklink_sdk loaded successfully")
-        except ImportError:
-            logger.error("Neither apexomni nor apexpro zklink_sdk could be loaded!")
-            logger.error("Install: pip install apexomni-x86-windows-linux")
+    except Exception as e:
+        logger.error(f"zklink_sdk failed to load: {e}")
+        logger.error("Install: pip install apexomni-x86-windows-linux")
 
 
 class OrderRequest(BaseModel):
