@@ -1,0 +1,11 @@
+version: '3.8'
+services:
+  apex-signer:
+    build: .
+    ports:
+      - "8099:8099"
+    environment:
+      - SIGNER_SECRET=${SIGNER_SECRET:-vertbacon-signer-key-change-me}
+      - APEX_API_BASE=https://pro.apex.exchange
+      - PORT=8099
+    restart: unless-stopped
