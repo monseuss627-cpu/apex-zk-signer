@@ -34,8 +34,23 @@ async def load_sdk():
         zklink_sdk = sdk
         logger.info("zklink_sdk loaded successfully")
     except Exception as e:
-        logger.error(f"zklink_sdk failed to load: {e}")
-        logger.error("Install: pip install apexomni-x86-windows-linux")
+        logger.error(f"Primary import failed: {e}")
+        # Try loading the .so directly and patching
+        try:
+            import ctypes, glob, importlib
+            so_files = glob.glob("/usr/local/lib/python3.11/site-packages/apexpro/libzklink_sdk*so*")
+            if so_files:
+                logger.info(f"Found .so files: {so_files}")
+                ctypes.cdll.LoadLibrary(so_files[0])
+                logger.info("Native library loaded directly")
+                # Now retry the import
+                from apexpro import zklink_sdk as sdk
+                zklink_sdk = sdk
+                logger.info("zklink_sdk loaded on retry")
+            else:
+                logger.error("No .so files found")
+        except Exception as e2:
+            logger.error(f"All import attempts failed: {e2}")
 
 
 class OrderRequest(BaseModel):
