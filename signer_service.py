@@ -39,9 +39,7 @@ async def load_sdk():
             import ctypes, glob
             so_files = glob.glob("/usr/local/lib/python3.11/site-packages/apexpro/libzklink_sdk*so*")
             if so_files:
-                logger.info(f"Found .so files: {so_files}")
                 ctypes.cdll.LoadLibrary(so_files[0])
-                logger.info("Native library loaded directly")
                 from apexpro import zklink_sdk as sdk
                 zklink_sdk = sdk
                 logger.info("zklink_sdk loaded on retry")
@@ -92,34 +90,44 @@ def _hmac_sign(message: str, secret: str) -> str:
     return base64.standard_b64encode(sig).decode()
 
 
-def _get_zk_signer(seeds: str):
-    if not zklink_sdk:
-        raise HTTPException(status_code=500, detail="zklink_sdk not loaded")
-    seeds_hex = seeds.removeprefix("0x")
-    seeds_bytes = bytes.fromhex(seeds_hex)
-    return zklink_sdk.ZkLinkSigner().new_from_seed(seeds_bytes)
-
-
 def _sign_order(seeds: str, order_to_sign: dict) -> dict:
+    """Sign an order using ZK contract signature - matching CCXT's exact implementation"""
     if not zklink_sdk:
         raise HTTPException(status_code=500, detail="zklink_sdk not loaded")
-    signer = _get_zk_signer(seeds)
-    contract = zklink_sdk.Contract(
-        account_id=int(order_to_sign["accountId"]),
-        sub_account_id=1,
-        slot_id=int(order_to_sign["slotId"]),
-        nonce=int(order_to_sign["nonce"]),
-        pair_id=int(order_to_sign["pairId"]),
-        size=order_to_sign["size"],
-        price=order_to_sign["price"],
-        direction=1 if order_to_sign["direction"] == "BUY" else 0,
-        maker_fee_rate=int(float(order_to_sign.get("makerFeeRate", "0.0002")) * 10000),
-        taker_fee_rate=int(float(order_to_sign.get("takerFeeRate", "0.0005")) * 10000),
+
+    from decimal import Decimal
+    import hashlib as hl
+
+    slot_id_raw = order_to_sign["slotId"]
+    nonce_int = int(hl.sha256(slot_id_raw.encode()).hexdigest(), 16)
+
+    max_uint64 = 18446744073709551615
+    max_uint32 = 4294967295
+
+    slot_id = int((nonce_int % max_uint64) / max_uint32)
+    nonce = nonce_int % max_uint32
+    account_id = int(order_to_sign["accountId"]) % max_uint32
+
+    price_str = str(int((Decimal(order_to_sign["price"]) * Decimal(10) ** Decimal('18')).quantize(Decimal(0), rounding='ROUND_DOWN')))
+    size_str = str(int((Decimal(order_to_sign["size"]) * Decimal(10) ** Decimal('18')).quantize(Decimal(0), rounding='ROUND_DOWN')))
+
+    taker_fee_rate = int((Decimal(order_to_sign.get("takerFeeRate", "0.0005")) * Decimal(10000)).quantize(Decimal(0), rounding='ROUND_UP'))
+    maker_fee_rate = int((Decimal(order_to_sign.get("makerFeeRate", "0.0002")) * Decimal(10000)).quantize(Decimal(0), rounding='ROUND_UP'))
+
+    is_buy = order_to_sign["direction"] == "BUY"
+
+    builder = zklink_sdk.ContractBuilder(
+        int(account_id), int(0), int(slot_id), int(nonce),
+        int(order_to_sign["pairId"]),
+        size_str, price_str, is_buy,
+        int(taker_fee_rate), int(maker_fee_rate), False
     )
-    auth_data = signer.sign_musig(contract.get_bytes())
+    tx = zklink_sdk.Contract(builder)
+    seeds_bytes = bytes.fromhex(seeds.removeprefix("0x"))
+    signer_seed = zklink_sdk.ZkLinkSigner().new_from_seed(seeds_bytes)
+    auth_data = signer_seed.sign_musig(tx.get_bytes())
     return {
         "signature": auth_data.signature,
-        "pubKey": signer.public_key(),
     }
 
 
@@ -134,6 +142,7 @@ async def health():
 
 @app.post("/sign-order")
 async def sign_order(req: OrderRequest):
+    """Sign and submit a market order to ApeX"""
     _verify_token(req.signer_token)
     if not zklink_sdk:
         raise HTTPException(status_code=500, detail="zklink_sdk not loaded on this server")
@@ -164,7 +173,6 @@ async def sign_order(req: OrderRequest):
             return {"error": "Could not determine accountId"}
 
         slot_id = str(int(time.time() * 1000))
-        nonce = slot_id
 
         pair_map = {"BTC-USDT": 1, "ETH-USDT": 2, "SOL-USDT": 3}
         pair_id = pair_map.get(req.symbol, 1)
@@ -172,7 +180,6 @@ async def sign_order(req: OrderRequest):
         order_to_sign = {
             "accountId": str(account_id),
             "slotId": slot_id,
-            "nonce": nonce,
             "pairId": str(pair_id),
             "size": str(req.size),
             "price": str(round(req.price, 1)),
@@ -198,7 +205,6 @@ async def sign_order(req: OrderRequest):
             "reduceOnly": str(req.reduce_only).lower(),
             "clientId": slot_id,
             "signature": zk_sig["signature"],
-            "l2Key": zk_sig["pubKey"],
             "isOpenTpslOrder": "false",
             "isSetOpenSl": "false",
             "isSetOpenTp": "false",
