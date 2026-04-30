@@ -170,9 +170,13 @@ async def sign_order(req: OrderRequest):
             return {"error": f"ZK signing failed: {str(e)}"}
 
         # Step 3: Build order params (sorted by key, URL-encoded)
+        import math
         taker_fee = str(round(req.price * req.size * 0.0005 + 0.01, 6))
+        expiration = int(math.floor(time.time() + 30 * 24 * 60 * 60))
         order_body = {
+            "brokerId": "6956",
             "clientId": slot_id,
+            "expiration": str(expiration),
             "isOpenTpslOrder": "false",
             "isSetOpenSl": "false",
             "isSetOpenTp": "false",
@@ -186,7 +190,6 @@ async def sign_order(req: OrderRequest):
             "timeInForce": req.time_in_force,
             "type": "MARKET",
         }
-
         sorted_body = dict(sorted(order_body.items()))
         sign_body = '&'.join(f'{k}={v}' for k, v in sorted_body.items())
         path_order = "/api/v3/order"
