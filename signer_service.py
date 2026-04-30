@@ -1,18 +1,15 @@
 """
 ApeX ZK Order Signing Microservice
-Deploy on any x86_64 Linux server.
-Handles ZK contract signatures for ApeX order submission.
-Called via HTTP from the main VertBacon app.
 """
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import Optional, Dict, Any
+from urllib.parse import urlencode
 import hmac
 import hashlib
 import base64
 import time
 import httpx
-import uuid
 import os
 import logging
 
@@ -43,8 +40,6 @@ async def load_sdk():
                 from apexpro import zklink_sdk as sdk
                 zklink_sdk = sdk
                 logger.info("zklink_sdk loaded on retry")
-            else:
-                logger.error("No .so files found")
         except Exception as e2:
             logger.error(f"All import attempts failed: {e2}")
 
@@ -63,18 +58,6 @@ class OrderRequest(BaseModel):
     time_in_force: str = "GOOD_TIL_CANCEL"
 
 
-class WithdrawRequest(BaseModel):
-    api_key: str
-    api_secret: str
-    passphrase: str
-    seeds: str
-    amount: str
-    asset: str
-    to_chain: str
-    eth_address: str
-    signer_token: str
-
-
 def _verify_token(token: str):
     if token != SIGNER_SECRET:
         raise HTTPException(status_code=403, detail="Invalid signer token")
@@ -91,7 +74,6 @@ def _hmac_sign(message: str, secret: str) -> str:
 
 
 def _sign_order(seeds: str, order_to_sign: dict) -> dict:
-    """Sign an order using ZK contract signature - matching CCXT's exact implementation"""
     if not zklink_sdk:
         raise HTTPException(status_code=500, detail="zklink_sdk not loaded")
 
@@ -126,29 +108,23 @@ def _sign_order(seeds: str, order_to_sign: dict) -> dict:
     seeds_bytes = bytes.fromhex(seeds.removeprefix("0x"))
     signer_seed = zklink_sdk.ZkLinkSigner().new_from_seed(seeds_bytes)
     auth_data = signer_seed.sign_musig(tx.get_bytes())
-    return {
-        "signature": auth_data.signature,
-    }
+    return {"signature": auth_data.signature}
 
 
 @app.get("/health")
 async def health():
-    return {
-        "status": "ok",
-        "zklink_sdk_loaded": zklink_sdk is not None,
-        "version": "1.0.0",
-    }
+    return {"status": "ok", "zklink_sdk_loaded": zklink_sdk is not None, "version": "1.0.0"}
 
 
 @app.post("/sign-order")
 async def sign_order(req: OrderRequest):
-    """Sign and submit a market order to ApeX"""
     _verify_token(req.signer_token)
     if not zklink_sdk:
-        raise HTTPException(status_code=500, detail="zklink_sdk not loaded on this server")
+        raise HTTPException(status_code=500, detail="zklink_sdk not loaded")
 
     timestamp = str(int(time.time() * 1000))
 
+    # Step 1: Get account ID
     path_account = "/api/v3/account"
     msg_account = timestamp + "GET" + path_account
     sig_account = _hmac_sign(msg_account, req.api_secret)
@@ -172,8 +148,8 @@ async def sign_order(req: OrderRequest):
         if not account_id:
             return {"error": "Could not determine accountId"}
 
+        # Step 2: ZK sign the order
         slot_id = str(int(time.time() * 1000))
-
         pair_map = {"BTC-USDT": 1, "ETH-USDT": 2, "SOL-USDT": 3}
         pair_id = pair_map.get(req.symbol, 1)
 
@@ -193,36 +169,41 @@ async def sign_order(req: OrderRequest):
         except Exception as e:
             return {"error": f"ZK signing failed: {str(e)}"}
 
+        # Step 3: Build order params (sorted by key, URL-encoded)
         taker_fee = str(round(req.price * req.size * 0.0005 + 0.01, 6))
         order_body = {
-            "symbol": req.symbol,
-            "side": req.side.upper(),
-            "type": "MARKET",
-            "size": str(req.size),
-            "price": str(round(req.price, 1)),
-            "limitFee": taker_fee,
-            "timeInForce": req.time_in_force,
-            "reduceOnly": str(req.reduce_only).lower(),
             "clientId": slot_id,
-            "signature": zk_sig["signature"],
             "isOpenTpslOrder": "false",
             "isSetOpenSl": "false",
             "isSetOpenTp": "false",
+            "limitFee": taker_fee,
+            "price": str(round(req.price, 1)),
+            "reduceOnly": str(req.reduce_only).lower(),
+            "side": req.side.upper(),
+            "signature": zk_sig["signature"],
+            "size": str(req.size),
+            "symbol": req.symbol,
+            "timeInForce": req.time_in_force,
+            "type": "MARKET",
         }
 
-        import json
-        sign_body = json.dumps(order_body, separators=(",", ":"))
+        sorted_body = dict(sorted(order_body.items()))
+        sign_body = urlencode(sorted_body)
         path_order = "/api/v3/order"
-        msg_order = timestamp + "POST" + path_order + sign_body
+
+        # Step 4: HMAC sign the order request (fresh timestamp)
+        timestamp2 = str(int(time.time() * 1000))
+        msg_order = timestamp2 + "POST" + path_order + sign_body
         sig_order = _hmac_sign(msg_order, req.api_secret)
 
+        # Step 5: Submit as form-encoded POST
         resp = await client.post(
             f"{APEX_API_BASE}{path_order}",
             headers={
-                "Content-Type": "application/json",
+                "Content-Type": "application/x-www-form-urlencoded",
                 "APEX-API-KEY": req.api_key,
                 "APEX-PASSPHRASE": req.passphrase,
-                "APEX-TIMESTAMP": timestamp,
+                "APEX-TIMESTAMP": timestamp2,
                 "APEX-SIGNATURE": sig_order,
             },
             content=sign_body,
@@ -248,18 +229,7 @@ async def sign_order(req: OrderRequest):
                 "type": "market",
             }
         else:
-            return {
-                "error": result.get("msg") or str(result),
-                "code": result.get("code"),
-            }
-
-
-@app.post("/sign-withdrawal")
-async def sign_withdrawal(req: WithdrawRequest):
-    _verify_token(req.signer_token)
-    if not zklink_sdk:
-        raise HTTPException(status_code=500, detail="zklink_sdk not loaded")
-    return {"status": "not_implemented_yet", "note": "Use /sign-order for trading"}
+            return {"error": result.get("msg") or str(result), "code": result.get("code")}
 
 
 if __name__ == "__main__":
