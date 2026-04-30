@@ -188,7 +188,7 @@ async def sign_order(req: OrderRequest):
         }
 
         sorted_body = dict(sorted(order_body.items()))
-        sign_body = urlencode(sorted_body)
+        sign_body = '&'.join(f'{k}={v}' for k, v in sorted_body.items())
         path_order = "/api/v3/order"
 
         # Step 4: HMAC sign the order request (fresh timestamp)
