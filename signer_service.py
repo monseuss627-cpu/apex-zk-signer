@@ -191,9 +191,10 @@ async def sign_order(req: OrderRequest):
         path_order = "/api/v3/order"
 
         # Step 4: HMAC sign the order request (fresh timestamp)
-        timestamp2 = str(int(time.time() * 1000))
-        msg_order = timestamp2 + "POST" + path_order + sign_body
-        sig_order = _hmac_sign(msg_order, req.api_secret)
+       
+pair_map = {"BTC-USDT": 50001, "ETH-USDT": 50002, "SOL-USDT": 50003}
+pair_id = pair_map.get(req.symbol, 50001)
+
 
         # Step 5: Submit as form-encoded POST
         resp = await client.post(
