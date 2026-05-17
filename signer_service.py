@@ -10,6 +10,7 @@ implementations EXACTLY so ApeX accepts the ZK signature.
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import Optional, Dict, Any
+from contextlib import asynccontextmanager
 import hmac
 import hashlib
 import base64
@@ -25,16 +26,16 @@ from urllib.parse import urlencode
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("apex-signer")
 
-app = FastAPI(title="ApeX ZK Signer", docs_url="/docs")
-
 zklink_sdk = None
 SIGNER_SECRET = os.environ.get("SIGNER_SECRET", "vertbacon-signer-key-change-me")
 APEX_API_BASE = os.environ.get("APEX_API_BASE", "https://omni.apex.exchange")
 
 
-@app.on_event("startup")
-async def load_sdk():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan context manager for startup/shutdown events."""
     global zklink_sdk
+    # Startup
     try:
         from apexomni import zklink_sdk as sdk
         zklink_sdk = sdk
@@ -46,6 +47,19 @@ async def load_sdk():
             logger.info("zklink_sdk loaded from apexpro")
         except ImportError:
             logger.error("Neither apexomni nor apexpro zklink_sdk could be loaded!")
+    
+    yield  # This is where the app runs
+    
+    # Shutdown (cleanup if needed)
+    logger.info("Shutting down ApeX signer service")
+
+
+# Create FastAPI app with lifespan
+app = FastAPI(
+    title="ApeX ZK Signer", 
+    docs_url="/docs",
+    lifespan=lifespan
+)
 
 
 class OrderRequest(BaseModel):
@@ -328,3 +342,8 @@ async def sign_order(req: OrderRequest):
                 "error": result.get("msg", "Unknown error"),
                 "raw_response": result
             }
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
