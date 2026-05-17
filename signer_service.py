@@ -58,6 +58,7 @@ class OrderRequest(BaseModel):
     size: float
     price: float
     signer_token: str
+    order_type: str = "LIMIT"  # Changed default to LIMIT
     reduce_only: bool = False
     time_in_force: str = "GOOD_TIL_CANCEL"
 
@@ -184,7 +185,7 @@ async def health():
 @app.post("/sign-order")
 async def sign_order(req: OrderRequest):
     """
-    Build + sign + submit an ApeX market order.
+    Build + sign + submit an ApeX LIMIT order.
     Mirrors ccxt.apex.create_order + get_zk_contract_signature_obj exactly.
     """
     _verify_token(req.signer_token)
@@ -228,13 +229,9 @@ async def sign_order(req: OrderRequest):
         order_size = _amount_to_precision(req.size, size_step)
         order_price = _price_to_precision(req.price, price_step)
 
+        # For limit orders, we still need taker/maker fee rates for ZK signature
         taker = "0.0005"
         maker = "0.0002"
-
-        # limitFee = (price * size * taker) + price_step
-        fee_val = (Decimal(order_price) * Decimal(order_size) * Decimal(taker)) + Decimal(price_step)
-        step_d = Decimal(price_step)
-        limit_fee = format(((fee_val // step_d) * step_d).quantize(step_d), "f")
 
         # CCXT-format clientOrderId
         client_order_id = _generate_random_client_id_omni(account_id)
@@ -259,21 +256,26 @@ async def sign_order(req: OrderRequest):
         time_now_ms = int(time.time() * 1000)
         expiration = int(math.floor(time_now_ms / 1000 + 30 * 24 * 60 * 60))
 
+        # Build request body for LIMIT order
         request_body = {
             "symbol": req.symbol,
             "side": req.side.upper(),
-            "type": "MARKET",
+            "type": req.order_type.upper(),  # Will be "LIMIT"
             "size": order_size,
             "price": order_price,
-            "limitFee": limit_fee,
             "expiration": expiration,
             "timeInForce": req.time_in_force,
             "clientId": client_order_id,
             "brokerId": "6956",
             "signature": signature,
         }
+        
+        # Add reduceOnly if specified
         if req.reduce_only:
             request_body["reduceOnly"] = "true"
+            
+        # For limit orders, remove limitFee (not needed)
+        # Keep the body as is without limitFee field
 
         sorted_body = dict(sorted(request_body.items()))
         sign_body = urlencode(sorted_body)
@@ -303,38 +305,26 @@ async def sign_order(req: OrderRequest):
             result = {"raw": resp2.text[:500]}
 
         logger.info(
-            "ApeX order %s %s %s @ %s -> %s %s",
-            req.side, order_size, req.symbol, order_price, resp2.status_code, str(result)[:300],
+            "ApeX %s order %s %s %s @ %s -> %s %s",
+            req.order_type, req.side, order_size, req.symbol, order_price, 
+            resp2.status_code, str(result)[:300],
         )
 
         if result.get("data"):
             info = result["data"]
             return {
-                "status": "filled",
-                "id": info.get("id", ""),
-                "price": float(info.get("price") or order_price),
-                "average": float(info.get("avgFillPrice") or order_price),
-                "filled": float(info.get("filledSize") or order_size),
+                "status": "order_placed",
+                "id": info.get("id"),
                 "symbol": req.symbol,
                 "side": req.side,
-                "type": "market",
+                "size": order_size,
+                "price": order_price,
+                "order_type": req.order_type,
+                "client_order_id": client_order_id,
+                "raw_response": info
             }
-
-        return {
-            "error": result.get("msg") or str(result)[:300],
-            "code": result.get("code"),
-            "key": result.get("key"),
-            "detail": result.get("detail"),
-        }
-
-
-@app.post("/sign-withdrawal")
-async def sign_withdrawal(req: WithdrawRequest):
-    _verify_token(req.signer_token)
-    return {"status": "not_implemented_yet", "note": "Use /sign-order for trading"}
-
-
-if __name__ == "__main__":
-    import uvicorn
-    port = int(os.environ.get("PORT", 8099))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+        else:
+            return {
+                "error": result.get("msg", "Unknown error"),
+                "raw_response": result
+            }
