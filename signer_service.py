@@ -2,6 +2,7 @@
 ApeX ZK Order Signing Microservice
 """
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Optional, Dict, Any
 from contextlib import asynccontextmanager
@@ -51,15 +52,17 @@ app = FastAPI(
 )
 
 
-# ==================== ROOT ENDPOINT (Critical for Render) ====================
+# ==================== ROOT ENDPOINT (Critical for Render Health Checks) ====================
 @app.get("/")
+@app.head("/")                    # ← This fixes the 405 Method Not Allowed
 async def root():
-    return {
+    """Root endpoint supporting both GET and HEAD requests"""
+    return JSONResponse({
         "status": "healthy",
         "service": "ApeX ZK Signer",
         "zklink_sdk_loaded": zklink_sdk is not None,
-        "version": "2.0.1"
-    }
+        "version": "2.0.2"
+    })
 
 
 @app.get("/health")
@@ -67,7 +70,7 @@ async def health():
     return {
         "status": "ok",
         "zklink_sdk_loaded": zklink_sdk is not None,
-        "version": "2.0.1",
+        "version": "2.0.2",
         "api_base": APEX_API_BASE,
     }
 
@@ -180,7 +183,6 @@ def _sign_order_zk(seeds: str, order_to_sign: dict) -> str:
     return auth_data.signature
 
 
-# ... (your /sign-order endpoint stays exactly the same) ...
 @app.post("/sign-order")
 async def sign_order(req: OrderRequest):
     _verify_token(req.signer_token)
