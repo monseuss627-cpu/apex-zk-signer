@@ -1,10 +1,11 @@
 """
 ApeX ZK Order Signing Microservice
+Deploy on any x86_64 Linux server.
+Handles ZK contract signatures for ApeX order submission.
 """
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from typing import Optional, Dict, Any
 from contextlib import asynccontextmanager
 import hmac
 import hashlib
@@ -28,7 +29,9 @@ APEX_API_BASE = os.environ.get("APEX_API_BASE", "https://pro.apex.exchange")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """Lifespan context manager for startup/shutdown events."""
     global zklink_sdk
+    # Startup
     try:
         from apexomni import zklink_sdk as sdk
         zklink_sdk = sdk
@@ -41,10 +44,13 @@ async def lifespan(app: FastAPI):
         except ImportError:
             logger.error("❌ Neither apexomni nor apexpro zklink_sdk could be loaded!")
     
-    yield
+    yield  # This is where the app runs
+    
+    # Shutdown
     logger.info("Shutting down ApeX signer service")
 
 
+# Create FastAPI app
 app = FastAPI(
     title="ApeX ZK Signer", 
     docs_url="/docs",
@@ -56,11 +62,12 @@ app = FastAPI(
 @app.get("/")
 @app.head("/")
 async def root():
+    """Root endpoint for Render health checks"""
     return JSONResponse({
         "status": "healthy",
         "service": "ApeX ZK Signer",
         "zklink_sdk_loaded": zklink_sdk is not None,
-        "version": "2.0.3"
+        "version": "2.0.4"
     })
 
 
@@ -69,12 +76,13 @@ async def health():
     return {
         "status": "ok",
         "zklink_sdk_loaded": zklink_sdk is not None,
-        "version": "2.0.3",
+        "version": "2.0.4",
         "api_base": APEX_API_BASE,
     }
 
 
 @app.get("/trading/diagnose")
+@app.post("/trading/diagnose")
 async def trading_diagnose():
     """Diagnostic endpoint requested by main VertBacon app"""
     return {
@@ -82,8 +90,8 @@ async def trading_diagnose():
         "service": "apex-signer",
         "status": "healthy",
         "sdk_loaded": zklink_sdk is not None,
-        "version": "2.0.3",
-        "message": "Diagnostic endpoint working - ready for order signing"
+        "version": "2.0.4",
+        "message": "Diagnostic endpoint working - supports GET and POST"
     }
 
 
@@ -92,8 +100,8 @@ class OrderRequest(BaseModel):
     api_secret: str
     passphrase: str
     seeds: str
-    symbol: str
-    side: str
+    symbol: str          # e.g. "BTC-USDT"
+    side: str            # "BUY" or "SELL"
     size: float
     price: float
     signer_token: str
@@ -101,8 +109,6 @@ class OrderRequest(BaseModel):
     reduce_only: bool = False
     time_in_force: str = "GOOD_TIL_CANCEL"
 
-
-# ... [Rest of your functions remain the same] ...
 
 def _verify_token(token: str):
     if token != SIGNER_SECRET:
@@ -140,9 +146,9 @@ def _price_to_precision(value: float, step: str = "0.1") -> str:
 
 
 SYMBOL_INFO = {
-    "BTC-USDT": {"pair_id": 50001, "price_step": "0.1",  "size_step": "0.001"},
-    "ETH-USDT": {"pair_id": 50002, "price_step": "0.01", "size_step": "0.01"},
-    "SOL-USDT": {"pair_id": 50003, "price_step": "0.001", "size_step": "0.1"},
+    "BTC-USDT":  {"pair_id": 50001, "price_step": "0.1",  "size_step": "0.001"},
+    "ETH-USDT":  {"pair_id": 50002, "price_step": "0.01", "size_step": "0.01"},
+    "SOL-USDT":  {"pair_id": 50003, "price_step": "0.001", "size_step": "0.1"},
 }
 
 
@@ -285,16 +291,23 @@ async def sign_order(req: OrderRequest):
 
         try:
             result = resp2.json()
-        except:
+        except Exception:
             result = {"raw": resp2.text[:500]}
 
-        logger.info(f"ApeX order {req.side} {order_size} {req.symbol} @ {order_price} -> {resp2.status_code}")
+        logger.info(
+            "ApeX %s order %s %s %s @ %s -> %s",
+            req.order_type, req.side, order_size, req.symbol, order_price, resp2.status_code
+        )
 
         if result.get("data"):
             info = result["data"]
             return {
                 "status": "order_placed",
                 "id": info.get("id"),
+                "symbol": req.symbol,
+                "side": req.side,
+                "size": order_size,
+                "price": order_price,
                 "client_order_id": client_order_id,
                 "raw_response": info
             }
