@@ -1,7 +1,5 @@
 """
 ApeX ZK Order Signing Microservice
-Deploy on any x86_64 Linux server.
-Handles ZK contract signatures for ApeX order submission.
 """
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
@@ -29,9 +27,7 @@ APEX_API_BASE = os.environ.get("APEX_API_BASE", "https://pro.apex.exchange")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Lifespan context manager for startup/shutdown events."""
     global zklink_sdk
-    # Startup
     try:
         from apexomni import zklink_sdk as sdk
         zklink_sdk = sdk
@@ -44,13 +40,10 @@ async def lifespan(app: FastAPI):
         except ImportError:
             logger.error("❌ Neither apexomni nor apexpro zklink_sdk could be loaded!")
     
-    yield  # This is where the app runs
-    
-    # Shutdown
+    yield
     logger.info("Shutting down ApeX signer service")
 
 
-# Create FastAPI app
 app = FastAPI(
     title="ApeX ZK Signer", 
     docs_url="/docs",
@@ -62,12 +55,11 @@ app = FastAPI(
 @app.get("/")
 @app.head("/")
 async def root():
-    """Root endpoint for Render health checks"""
     return JSONResponse({
         "status": "healthy",
         "service": "ApeX ZK Signer",
         "zklink_sdk_loaded": zklink_sdk is not None,
-        "version": "2.0.4"
+        "version": "2.0.5"
     })
 
 
@@ -76,7 +68,7 @@ async def health():
     return {
         "status": "ok",
         "zklink_sdk_loaded": zklink_sdk is not None,
-        "version": "2.0.4",
+        "version": "2.0.5",
         "api_base": APEX_API_BASE,
     }
 
@@ -84,14 +76,13 @@ async def health():
 @app.get("/trading/diagnose")
 @app.post("/trading/diagnose")
 async def trading_diagnose():
-    """Diagnostic endpoint requested by main VertBacon app"""
     return {
         "ok": True,
         "service": "apex-signer",
         "status": "healthy",
         "sdk_loaded": zklink_sdk is not None,
-        "version": "2.0.4",
-        "message": "Diagnostic endpoint working - supports GET and POST"
+        "version": "2.0.5",
+        "message": "Diagnostic endpoint working"
     }
 
 
@@ -100,8 +91,8 @@ class OrderRequest(BaseModel):
     api_secret: str
     passphrase: str
     seeds: str
-    symbol: str          # e.g. "BTC-USDT"
-    side: str            # "BUY" or "SELL"
+    symbol: str
+    side: str
     size: float
     price: float
     signer_token: str
@@ -146,9 +137,9 @@ def _price_to_precision(value: float, step: str = "0.1") -> str:
 
 
 SYMBOL_INFO = {
-    "BTC-USDT":  {"pair_id": 50001, "price_step": "0.1",  "size_step": "0.001"},
-    "ETH-USDT":  {"pair_id": 50002, "price_step": "0.01", "size_step": "0.01"},
-    "SOL-USDT":  {"pair_id": 50003, "price_step": "0.001", "size_step": "0.1"},
+    "BTC-USDT": {"pair_id": 50001, "price_step": "0.1",  "size_step": "0.001"},
+    "ETH-USDT": {"pair_id": 50002, "price_step": "0.01", "size_step": "0.01"},
+    "SOL-USDT": {"pair_id": 50003, "price_step": "0.001", "size_step": "0.1"},
 }
 
 
@@ -252,6 +243,7 @@ async def sign_order(req: OrderRequest):
         time_now_ms = int(time.time() * 1000)
         expiration = int(math.floor(time_now_ms / 1000 + 30 * 24 * 60 * 60))
 
+        # Build request body - Fixed with limitFee
         request_body = {
             "symbol": req.symbol,
             "side": req.side.upper(),
@@ -263,6 +255,7 @@ async def sign_order(req: OrderRequest):
             "clientId": client_order_id,
             "brokerId": "6956",
             "signature": signature,
+            "limitFee": "0.002"                    # ← Fixed: Required by ApeX
         }
         
         if req.reduce_only:
@@ -294,20 +287,13 @@ async def sign_order(req: OrderRequest):
         except Exception:
             result = {"raw": resp2.text[:500]}
 
-        logger.info(
-            "ApeX %s order %s %s %s @ %s -> %s",
-            req.order_type, req.side, order_size, req.symbol, order_price, resp2.status_code
-        )
+        logger.info(f"ApeX {req.order_type} {req.side} {order_size} {req.symbol} @ {order_price} -> {resp2.status_code}")
 
         if result.get("data"):
             info = result["data"]
             return {
                 "status": "order_placed",
                 "id": info.get("id"),
-                "symbol": req.symbol,
-                "side": req.side,
-                "size": order_size,
-                "price": order_price,
                 "client_order_id": client_order_id,
                 "raw_response": info
             }
