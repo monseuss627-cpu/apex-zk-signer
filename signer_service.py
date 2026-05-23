@@ -59,7 +59,7 @@ async def root():
         "status": "healthy",
         "service": "ApeX ZK Signer",
         "zklink_sdk_loaded": zklink_sdk is not None,
-        "version": "2.0.5"
+        "version": "2.0.6"
     })
 
 
@@ -68,7 +68,7 @@ async def health():
     return {
         "status": "ok",
         "zklink_sdk_loaded": zklink_sdk is not None,
-        "version": "2.0.5",
+        "version": "2.0.6",
         "api_base": APEX_API_BASE,
     }
 
@@ -81,8 +81,27 @@ async def trading_diagnose():
         "service": "apex-signer",
         "status": "healthy",
         "sdk_loaded": zklink_sdk is not None,
-        "version": "2.0.5",
+        "version": "2.0.6",
         "message": "Diagnostic endpoint working"
+    }
+
+
+@app.get("/debug")
+@app.post("/debug")
+async def debug_info():
+    """Show all available routes - very useful for debugging"""
+    routes = []
+    for route in app.routes:
+        if hasattr(route, 'methods') and hasattr(route, 'path'):
+            methods = sorted(list(route.methods)) if route.methods else []
+            routes.append(f"{route.path} [{','.join(methods)}]")
+    
+    return {
+        "ok": True,
+        "service": "apex-signer",
+        "version": "2.0.6",
+        "available_routes": routes,
+        "message": "Debug information"
     }
 
 
@@ -243,7 +262,6 @@ async def sign_order(req: OrderRequest):
         time_now_ms = int(time.time() * 1000)
         expiration = int(math.floor(time_now_ms / 1000 + 30 * 24 * 60 * 60))
 
-        # Build request body - Fixed with limitFee
         request_body = {
             "symbol": req.symbol,
             "side": req.side.upper(),
@@ -255,7 +273,7 @@ async def sign_order(req: OrderRequest):
             "clientId": client_order_id,
             "brokerId": "6956",
             "signature": signature,
-            "limitFee": "0.002"                    # ← Fixed: Required by ApeX
+            "limitFee": "0.002"
         }
         
         if req.reduce_only:
