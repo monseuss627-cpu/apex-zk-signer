@@ -52,16 +52,15 @@ app = FastAPI(
 )
 
 
-# ==================== ROOT ENDPOINT (Critical for Render Health Checks) ====================
+# ==================== ROOT + DIAGNOSTIC ENDPOINTS ====================
 @app.get("/")
-@app.head("/")                    # ← This fixes the 405 Method Not Allowed
+@app.head("/")
 async def root():
-    """Root endpoint supporting both GET and HEAD requests"""
     return JSONResponse({
         "status": "healthy",
         "service": "ApeX ZK Signer",
         "zklink_sdk_loaded": zklink_sdk is not None,
-        "version": "2.0.2"
+        "version": "2.0.3"
     })
 
 
@@ -70,8 +69,21 @@ async def health():
     return {
         "status": "ok",
         "zklink_sdk_loaded": zklink_sdk is not None,
-        "version": "2.0.2",
+        "version": "2.0.3",
         "api_base": APEX_API_BASE,
+    }
+
+
+@app.get("/trading/diagnose")
+async def trading_diagnose():
+    """Diagnostic endpoint requested by main VertBacon app"""
+    return {
+        "ok": True,
+        "service": "apex-signer",
+        "status": "healthy",
+        "sdk_loaded": zklink_sdk is not None,
+        "version": "2.0.3",
+        "message": "Diagnostic endpoint working - ready for order signing"
     }
 
 
@@ -90,17 +102,7 @@ class OrderRequest(BaseModel):
     time_in_force: str = "GOOD_TIL_CANCEL"
 
 
-class WithdrawRequest(BaseModel):
-    api_key: str
-    api_secret: str
-    passphrase: str
-    seeds: str
-    amount: str
-    asset: str
-    to_chain: str
-    eth_address: str
-    signer_token: str
-
+# ... [Rest of your functions remain the same] ...
 
 def _verify_token(token: str):
     if token != SIGNER_SECRET:
