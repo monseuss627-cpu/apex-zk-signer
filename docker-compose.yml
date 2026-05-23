@@ -1,4 +1,5 @@
 version: '3.8'
+
 services:
   apex-signer:
     build: .
@@ -9,3 +10,10 @@ services:
       - APEX_API_BASE=https://pro.apex.exchange
       - PORT=8099
     restart: unless-stopped
+    # Optional: Increase healthcheck reliability
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8099/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s

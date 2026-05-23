@@ -1,11 +1,5 @@
 """
 ApeX ZK Order Signing Microservice
-Deploy on any x86_64 Linux server.
-Handles ZK contract signatures for ApeX order submission.
-Called via HTTP from the main VertBacon app.
-
-This service mirrors CCXT's `apex.create_order` + `get_zk_contract_signature_obj`
-implementations EXACTLY so ApeX accepts the ZK signature.
 """
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -28,33 +22,28 @@ logger = logging.getLogger("apex-signer")
 
 zklink_sdk = None
 SIGNER_SECRET = os.environ.get("SIGNER_SECRET", "vertbacon-signer-key-change-me")
-APEX_API_BASE = os.environ.get("APEX_API_BASE", "https://omni.apex.exchange")
+APEX_API_BASE = os.environ.get("APEX_API_BASE", "https://pro.apex.exchange")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Lifespan context manager for startup/shutdown events."""
     global zklink_sdk
-    # Startup
     try:
         from apexomni import zklink_sdk as sdk
         zklink_sdk = sdk
-        logger.info("zklink_sdk loaded from apexomni")
+        logger.info("✅ zklink_sdk loaded from apexomni")
     except ImportError:
         try:
             import apexpro.zklink_sdk as sdk
             zklink_sdk = sdk
-            logger.info("zklink_sdk loaded from apexpro")
+            logger.info("✅ zklink_sdk loaded from apexpro")
         except ImportError:
-            logger.error("Neither apexomni nor apexpro zklink_sdk could be loaded!")
+            logger.error("❌ Neither apexomni nor apexpro zklink_sdk could be loaded!")
     
-    yield  # This is where the app runs
-    
-    # Shutdown (cleanup if needed)
+    yield
     logger.info("Shutting down ApeX signer service")
 
 
-# Create FastAPI app with lifespan
 app = FastAPI(
     title="ApeX ZK Signer", 
     docs_url="/docs",
@@ -62,17 +51,38 @@ app = FastAPI(
 )
 
 
+# ==================== ROOT ENDPOINT (Critical for Render) ====================
+@app.get("/")
+async def root():
+    return {
+        "status": "healthy",
+        "service": "ApeX ZK Signer",
+        "zklink_sdk_loaded": zklink_sdk is not None,
+        "version": "2.0.1"
+    }
+
+
+@app.get("/health")
+async def health():
+    return {
+        "status": "ok",
+        "zklink_sdk_loaded": zklink_sdk is not None,
+        "version": "2.0.1",
+        "api_base": APEX_API_BASE,
+    }
+
+
 class OrderRequest(BaseModel):
     api_key: str
     api_secret: str
     passphrase: str
     seeds: str
-    symbol: str          # e.g. "BTC-USDT"
-    side: str            # "BUY" or "SELL"
+    symbol: str
+    side: str
     size: float
     price: float
     signer_token: str
-    order_type: str = "LIMIT"  # Changed default to LIMIT
+    order_type: str = "LIMIT"
     reduce_only: bool = False
     time_in_force: str = "GOOD_TIL_CANCEL"
 
@@ -99,8 +109,6 @@ def _string_to_base64(s: str) -> str:
 
 
 def _hmac_sign(message: str, secret: str) -> str:
-    """HMAC-SHA256 with base64-encoded secret key, returns base64 signature.
-    Matches CCXT's self.hmac(msg, base64(secret), sha256, 'base64')."""
     key = _string_to_base64(secret).encode()
     sig = hmac.new(key, message.encode(), hashlib.sha256).digest()
     return base64.standard_b64encode(sig).decode()
@@ -111,12 +119,10 @@ def _rand_number(size: int) -> int:
 
 
 def _generate_random_client_id_omni(account_id: str) -> str:
-    """Mirror CCXT: 'apexomni-{accountId}-{ms}-{rand6}'"""
     return f"apexomni-{account_id}-{int(time.time() * 1000)}-{_rand_number(6)}"
 
 
 def _amount_to_precision(value: float, step: str = "0.001") -> str:
-    """Truncate to step precision (ROUND_DOWN)."""
     step_d = Decimal(step)
     v = (Decimal(str(value)) // step_d) * step_d
     return format(v.quantize(step_d), "f")
@@ -128,19 +134,14 @@ def _price_to_precision(value: float, step: str = "0.1") -> str:
     return format(v.quantize(step_d), "f")
 
 
-# Per-symbol precision / l2PairId (CCXT market info)
 SYMBOL_INFO = {
-    "BTC-USDT":  {"pair_id": 50001, "price_step": "0.1",  "size_step": "0.001"},
-    "ETH-USDT":  {"pair_id": 50002, "price_step": "0.01", "size_step": "0.01"},
-    "SOL-USDT":  {"pair_id": 50003, "price_step": "0.001", "size_step": "0.1"},
+    "BTC-USDT": {"pair_id": 50001, "price_step": "0.1",  "size_step": "0.001"},
+    "ETH-USDT": {"pair_id": 50002, "price_step": "0.01", "size_step": "0.01"},
+    "SOL-USDT": {"pair_id": 50003, "price_step": "0.001", "size_step": "0.1"},
 }
 
 
 def _sign_order_zk(seeds: str, order_to_sign: dict) -> str:
-    """
-    Sign a contract order using zklink_sdk. EXACT port of CCXT
-    base/exchange.py::get_zk_contract_signature_obj.
-    """
     if not zklink_sdk:
         raise HTTPException(status_code=500, detail="zklink_sdk not loaded")
 
@@ -167,17 +168,10 @@ def _sign_order_zk(seeds: str, order_to_sign: dict) -> str:
     is_buy = order_to_sign["direction"] == "BUY"
 
     builder = zklink_sdk.ContractBuilder(
-        int(account_id),
-        int(0),
-        int(slot_id),
-        int(nonce),
+        int(account_id), 0, int(slot_id), int(nonce),
         int(order_to_sign["pairId"]),
-        str(size_str),
-        str(price_str),
-        is_buy,
-        int(taker_fee_rate),
-        int(maker_fee_rate),
-        False,
+        str(size_str), str(price_str), is_buy,
+        int(taker_fee_rate), int(maker_fee_rate), False
     )
     tx = zklink_sdk.Contract(builder)
     seeds_bytes = bytes.fromhex(seeds.removeprefix("0x"))
@@ -186,22 +180,9 @@ def _sign_order_zk(seeds: str, order_to_sign: dict) -> str:
     return auth_data.signature
 
 
-@app.get("/health")
-async def health():
-    return {
-        "status": "ok",
-        "zklink_sdk_loaded": zklink_sdk is not None,
-        "version": "2.0.0",
-        "api_base": APEX_API_BASE,
-    }
-
-
+# ... (your /sign-order endpoint stays exactly the same) ...
 @app.post("/sign-order")
 async def sign_order(req: OrderRequest):
-    """
-    Build + sign + submit an ApeX LIMIT order.
-    Mirrors ccxt.apex.create_order + get_zk_contract_signature_obj exactly.
-    """
     _verify_token(req.signer_token)
     if not zklink_sdk:
         raise HTTPException(status_code=500, detail="zklink_sdk not loaded")
@@ -211,7 +192,6 @@ async def sign_order(req: OrderRequest):
     price_step = sym_info["price_step"]
     size_step = sym_info["size_step"]
 
-    # Step 1 — GET /api/v3/account to obtain numeric accountId
     timestamp = str(int(time.time() * 1000))
     path_account = "/api/v3/account"
     msg_account = timestamp + "GET" + path_account
@@ -231,23 +211,15 @@ async def sign_order(req: OrderRequest):
         )
         acc = resp.json()
         if not acc.get("data"):
-            return {"error": f"Failed to fetch account: {acc.get('msg', str(acc))[:200]}"}
+            raise HTTPException(status_code=400, detail=f"Failed to fetch account: {acc.get('msg')}")
 
-        account_data = acc["data"]
-        account_id = account_data.get("id")
+        account_id = str(acc["data"].get("id"))
         if not account_id:
-            return {"error": "accountId missing in /v3/account response"}
-        account_id = str(account_id)
+            raise HTTPException(status_code=400, detail="accountId missing")
 
-        # Precision-adjusted strings
         order_size = _amount_to_precision(req.size, size_step)
         order_price = _price_to_precision(req.price, price_step)
 
-        # For limit orders, we still need taker/maker fee rates for ZK signature
-        taker = "0.0005"
-        maker = "0.0002"
-
-        # CCXT-format clientOrderId
         client_order_id = _generate_random_client_id_omni(account_id)
 
         order_to_sign = {
@@ -258,23 +230,22 @@ async def sign_order(req: OrderRequest):
             "size": order_size,
             "price": order_price,
             "direction": req.side.upper(),
-            "makerFeeRate": maker,
-            "takerFeeRate": taker,
+            "makerFeeRate": "0.0002",
+            "takerFeeRate": "0.0005",
         }
 
         try:
             signature = _sign_order_zk(req.seeds, order_to_sign)
         except Exception as e:
-            return {"error": f"ZK signing failed: {str(e)}"}
+            raise HTTPException(status_code=500, detail=f"ZK signing failed: {str(e)}")
 
         time_now_ms = int(time.time() * 1000)
         expiration = int(math.floor(time_now_ms / 1000 + 30 * 24 * 60 * 60))
 
-        # Build request body for LIMIT order
         request_body = {
             "symbol": req.symbol,
             "side": req.side.upper(),
-            "type": req.order_type.upper(),  # Will be "LIMIT"
+            "type": req.order_type.upper(),
             "size": order_size,
             "price": order_price,
             "expiration": expiration,
@@ -284,12 +255,8 @@ async def sign_order(req: OrderRequest):
             "signature": signature,
         }
         
-        # Add reduceOnly if specified
         if req.reduce_only:
             request_body["reduceOnly"] = "true"
-            
-        # For limit orders, remove limitFee (not needed)
-        # Keep the body as is without limitFee field
 
         sorted_body = dict(sorted(request_body.items()))
         sign_body = urlencode(sorted_body)
@@ -308,42 +275,30 @@ async def sign_order(req: OrderRequest):
                 "APEX-TIMESTAMP": ts2,
                 "APEX-SIGNATURE": sig_order,
                 "User-Agent": "apex-CCXT",
-                "Accept": "application/json",
             },
             content=sign_body,
         )
 
         try:
             result = resp2.json()
-        except Exception:
+        except:
             result = {"raw": resp2.text[:500]}
 
-        logger.info(
-            "ApeX %s order %s %s %s @ %s -> %s %s",
-            req.order_type, req.side, order_size, req.symbol, order_price, 
-            resp2.status_code, str(result)[:300],
-        )
+        logger.info(f"ApeX order {req.side} {order_size} {req.symbol} @ {order_price} -> {resp2.status_code}")
 
         if result.get("data"):
             info = result["data"]
             return {
                 "status": "order_placed",
                 "id": info.get("id"),
-                "symbol": req.symbol,
-                "side": req.side,
-                "size": order_size,
-                "price": order_price,
-                "order_type": req.order_type,
                 "client_order_id": client_order_id,
                 "raw_response": info
             }
         else:
-            return {
-                "error": result.get("msg", "Unknown error"),
-                "raw_response": result
-            }
+            raise HTTPException(status_code=400, detail=result.get("msg", "Order failed"))
 
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    port = int(os.environ.get("PORT", 8099))
+    uvicorn.run(app, host="0.0.0.0", port=port)
