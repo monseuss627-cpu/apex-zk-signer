@@ -1876,6 +1876,71 @@ async def cancel_order(client_id: str, order_id: str = None, client_order_id: st
     return result
 
 # ------------------------------------------------------------------------------
+# EA AND PINESCRIPT MANAGEMENT ENDPOINTS (NEW)
+# ------------------------------------------------------------------------------
+@app.post("/api/auto/start")
+async def start_auto_trading(settings: EASettings):
+    client = get_client(settings.client_id)
+    if not client:
+        raise HTTPException(404, "Client not found")
+    start_ea_for_client(settings.client_id)
+    return {"success": True, "message": f"EA started for {settings.client_id}"}
+
+@app.post("/api/auto/stop/{client_id}")
+async def stop_auto_trading(client_id: str):
+    if not get_client(client_id):
+        raise HTTPException(404, "Client not found")
+    stop_ea_for_client(client_id)
+    return {"success": True, "message": f"EA stopped for {client_id}"}
+
+@app.post("/api/ea/upload")
+async def upload_ea_file(client_id: str = Form(...), file: UploadFile = File(...)):
+    if not get_client(client_id):
+        raise HTTPException(404, "Client not found")
+    # Ensure client-specific directory
+    client_ea_dir = os.path.join(EA_DIR, client_id)
+    os.makedirs(client_ea_dir, exist_ok=True)
+    file_path = os.path.join(client_ea_dir, file.filename)
+    content = await file.read()
+    with open(file_path, "wb") as f:
+        f.write(content)
+    # Save to database
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("INSERT INTO ea_files (id, client_id, name, file_path, uploaded_at) VALUES (?,?,?,?,?)",
+              (str(uuid.uuid4()), client_id, file.filename, file_path, datetime.now().isoformat()))
+    conn.commit()
+    conn.close()
+    return {"success": True, "filename": file.filename, "path": file_path}
+
+@app.get("/api/pine/list/{client_id}")
+async def list_pine_scripts(client_id: str):
+    if not get_client(client_id):
+        raise HTTPException(404, "Client not found")
+    scripts = get_all_pine_scripts(client_id)
+    return {"scripts": scripts}
+
+@app.post("/api/pine/save")
+async def save_pine_script(data: dict):
+    client_id = data.get("client_id")
+    name = data.get("name")
+    code = data.get("code")
+    if not client_id or not name or not code:
+        raise HTTPException(400, "Missing client_id, name or code")
+    if not get_client(client_id):
+        raise HTTPException(404, "Client not found")
+    # Save without compiling (just store)
+    script_id = save_pine_script_to_db(client_id, name, code)
+    return {"success": True, "script_id": script_id}
+
+@app.get("/api/pine/script/{script_id}")
+async def get_pine_script(script_id: str):
+    script = get_pine_script_by_id(script_id)
+    if not script:
+        raise HTTPException(404, "Script not found")
+    return {"script": script}
+
+# ------------------------------------------------------------------------------
 # LOGS, HISTORY, BACKTEST (unchanged)
 # ------------------------------------------------------------------------------
 @app.get("/api/logs/{client_id}")
@@ -2283,7 +2348,7 @@ HTML = """
         document.getElementById('brokerOrdersTable').innerHTML = ordersHtml;
 
         // Positions Table
-        let posHtml = `<tr><tr><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>Unrealized PnL</th></tr>`;
+        let posHtml = `<table><tr><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>Unrealized PnL</th></tr>`;
         const positions = data.positions || [];
         if (positions.length === 0) {
             posHtml += `<tr><td colspan="5">No open positions</td></tr>`;
@@ -2302,7 +2367,7 @@ HTML = """
         document.getElementById('brokerPositionsTable').innerHTML = posHtml;
 
         // Balances Table
-        let balHtml = `<tr><tr><th>Account</th><th>Total Equity</th><th>Available</th><th>Unrealized PnL</th></tr>`;
+        let balHtml = `<table><tr><th>Account</th><th>Total Equity</th><th>Available</th><th>Unrealized PnL</th></tr>`;
         const balances = data.balances || [];
         if (balances.length === 0) {
             balHtml += `<tr><td colspan="4">No balance data yet</td></tr>`;
@@ -2453,7 +2518,9 @@ HTML = """
     document.getElementById('startEABtn').onclick = async () => {
         const clientId = document.getElementById('eaClientId').value;
         if(!clientId) return alert('Client ID required');
-        const res = await fetch('/api/auto/start', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({client_id:clientId, symbol:'BTC-USDT', broker:'apex'}) });
+        const symbol = document.getElementById('eaSymbol').value;
+        const broker = document.getElementById('eaBroker').value;
+        const res = await fetch('/api/auto/start', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({client_id:clientId, symbol, broker}) });
         const data = await res.json(); alert(data.message);
     };
 
@@ -2468,7 +2535,7 @@ HTML = """
         if(!clientId || !file) return alert('Client ID and file required');
         const fd = new FormData(); fd.append('client_id',clientId); fd.append('file',file);
         const res = await fetch('/api/ea/upload', { method:'POST', body:fd });
-        const data = await res.json(); document.getElementById('eaStatus').innerHTML = data.success ? `✅ EA uploaded: ${data.filename}` : `❌ Upload failed`;
+        const data = await res.json(); document.getElementById('eaStatus').innerHTML = data.success ? `✅ EA uploaded: ${data.filename}` : `❌ Upload failed: ${data.detail || 'Unknown'}`;
     };
 
     async function loadSavedScripts() {
