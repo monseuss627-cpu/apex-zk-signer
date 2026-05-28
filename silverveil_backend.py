@@ -4,7 +4,8 @@ SilverVeil Trading Terminal v36.0 - External ZK Signing Service
 - All orders signed via https://apex-zk-signer-1.onrender.com
 - Full UI + OKX order books / chart data
 - EA uses real Perpetual balance
-- ApexClient now calls external signer
+- ApexClient calls external signer
+- Optimised for Render (persistent data in current directory)
 """
 
 import sys
@@ -32,7 +33,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 # ------------------------------------------------------------------------------
-# CONFIGURATION
+# CONFIGURATION (Render‑ready)
 # ------------------------------------------------------------------------------
 PORT = int(os.environ.get("PORT", 8000))
 ZK_SIGNER_URL = "https://apex-zk-signer-1.onrender.com"   # external signing service
@@ -49,10 +50,9 @@ SYMBOL_TO_OKX = {
 }
 
 # ------------------------------------------------------------------------------
-# PATHS & DATABASE
+# PATHS & DATABASE – use current working directory (writable on Render)
 # ------------------------------------------------------------------------------
-HOME = os.environ.get("HOME", "/data/data/com.termux/files/home")
-BASE_DIR = os.path.join(HOME, "SilverVeil")
+BASE_DIR = os.environ.get("SILVERVEIL_DATA", os.path.join(os.getcwd(), "SilverVeil"))
 DB_DIR = os.path.join(BASE_DIR, "data")
 EA_DIR = os.path.join(BASE_DIR, "ea_files")
 os.makedirs(DB_DIR, exist_ok=True)
@@ -1145,7 +1145,7 @@ async def lifespan(app: FastAPI):
     sync_task = asyncio.create_task(broker_sync_loop())
     print("="*60)
     print("🚀 SilverVeil Trading Terminal - EXTERNAL ZK SIGNER")
-    print(f"📍 http://localhost:{PORT}")
+    print(f"📍 Listening on 0.0.0.0:{PORT}")
     print("✅ Real OKX order book + chart data")
     print("✅ All orders signed via external ZK service")
     print("✅ EA uses real Perpetual balance")
@@ -1547,7 +1547,7 @@ async def health():
     return {"status": "online", "version": "36.0-external-zk-signer", "database": DATABASE_PATH, "zk_signer": ZK_SIGNER_URL}
 
 # ------------------------------------------------------------------------------
-# FRONTEND HTML (unchanged – full UI)
+# FRONTEND HTML (full UI, same as before)
 # ------------------------------------------------------------------------------
 HTML = """<!DOCTYPE html>
 <html lang="en">
@@ -1843,7 +1843,7 @@ HTML = """<!DOCTYPE html>
     }
 
     function updateBrokerDisplays(data) {
-        let ordersHtml = `<table><tr><th>ID</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Price</th><th>Status</th></tr>`;
+        let ordersHtml = `<table> hilab<th>ID</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Price</th><th>Status</th></tr>`;
         const orders = data.orders || [];
         if (orders.length === 0) ordersHtml += `<tr><td colspan="6">No open orders</td></tr>`;
         else orders.slice(0,10).forEach(o => ordersHtml += `<tr><td>${o.order_id.slice(0,8)}</td><td>${o.symbol}</td><td style="color:${o.side==='BUY'?'#00bcd4':'#ef5350'}">${o.side}</td><td>${o.quantity}</td><td>${o.price?parseFloat(o.price).toFixed(2):'-'}</td><td>${o.status}</td></tr>`);
