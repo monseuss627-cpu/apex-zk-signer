@@ -1,5 +1,6 @@
 """
 ApeX ZK Order Signing Microservice
+Integrated with omni_secret-based signing (first code) while preserving all paid functionality.
 """
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
@@ -24,6 +25,9 @@ zklink_sdk = None
 SIGNER_SECRET = os.environ.get("SIGNER_SECRET", "vertbacon-signer-key-change-me")
 APEX_API_BASE = os.environ.get("APEX_API_BASE", "https://pro.apex.exchange")
 
+# ---------- Cache for L2 keys derived from omni_secret (first code) ----------
+L2_KEY_CACHE = {}  # {omni_secret_hash: seeds_hex}
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -45,91 +49,13 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="ApeX ZK Signer", 
+    title="ApeX ZK Signer",
     docs_url="/docs",
     lifespan=lifespan
 )
 
 
-# ==================== DIAGNOSTIC + TRADING ENDPOINTS ====================
-@app.get("/")
-@app.head("/")
-async def root():
-    return JSONResponse({
-        "status": "healthy",
-        "service": "ApeX ZK Signer",
-        "version": "2.0.8"
-    })
-
-
-@app.get("/health")
-async def health():
-    return {"status": "ok", "version": "2.0.8"}
-
-
-@app.get("/trading/diagnose")
-@app.post("/trading/diagnose")
-async def trading_diagnose():
-    return {
-        "ok": True,
-        "service": "apex-signer",
-        "status": "healthy",
-        "version": "2.0.8"
-    }
-
-
-@app.post("/trading/start")
-async def trading_start():
-    """Called by main app to initialize signer"""
-    if not zklink_sdk:
-        raise HTTPException(status_code=500, detail="zklink_sdk not loaded")
-    return {
-        "ok": True,
-        "action": "start",
-        "status": "ready",
-        "message": "Signer service initialized"
-    }
-
-
-@app.post("/trading/stop")
-async def trading_stop():
-    """Called by main app to stop signer session"""
-    return {
-        "ok": True,
-        "action": "stop",
-        "status": "stopped",
-        "message": "Signer service stopped"
-    }
-
-
-@app.get("/debug")
-@app.post("/debug")
-async def debug_info():
-    routes = [f"{route.path} [{','.join(sorted(list(route.methods))) if route.methods else 'N/A'}]" 
-              for route in app.routes if hasattr(route, 'path')]
-    return {
-        "ok": True,
-        "service": "apex-signer",
-        "version": "2.0.8",
-        "available_routes": routes
-    }
-
-
-class OrderRequest(BaseModel):
-    api_key: str
-    api_secret: str
-    passphrase: str
-    seeds: str
-    symbol: str
-    side: str
-    size: float
-    price: float
-    signer_token: str
-    order_type: str = "LIMIT"
-    reduce_only: bool = False
-    time_in_force: str = "GOOD_TIL_CANCEL"
-
-
+# ==================== HELPER FUNCTIONS (existing) ====================
 def _verify_token(token: str):
     if token != SIGNER_SECRET:
         raise HTTPException(status_code=403, detail="Invalid signer token")
@@ -207,13 +133,147 @@ def _sign_order_zk(seeds: str, order_to_sign: dict) -> str:
     return auth_data.signature
 
 
+# ==================== NEW: omni_secret-based signing (first code integration) ====================
+class OmniSignOrderRequest(BaseModel):
+    omni_secret: str
+    order: dict          # expected to contain: accountId, pairId, size, price, direction, etc.
+    signer_token: str    # optional but recommended for security
+
+
+class OmniSignTransferRequest(BaseModel):
+    omni_secret: str
+    transfer: dict       # fields for transfer (e.g., to, amount, tokenId)
+    signer_token: str
+
+
+def derive_l2_key(omni_secret: str) -> str:
+    """
+    Derive an L2 key (seed hex) from an omni_secret.
+    Uses SHA256 to get a deterministic 32‑byte seed.
+    Production implementation should use a stronger KDF (e.g., PBKDF2) and salt.
+    """
+    secret_hash = hashlib.sha256(omni_secret.encode()).hexdigest()
+    if secret_hash in L2_KEY_CACHE:
+        return L2_KEY_CACHE[secret_hash]
+    # Simple derivation: treat the SHA256 as the seed hex
+    # If omni_secret is a mnemonic, replace this with BIP39 logic.
+    seeds_hex = secret_hash
+    L2_KEY_CACHE[secret_hash] = seeds_hex
+    return seeds_hex
+
+
+def sign_payload_l2(seeds_hex: str, order_dict: dict) -> str:
+    """Sign an order payload using the derived L2 key."""
+    # The order_dict must contain the same fields expected by _sign_order_zk
+    required_fields = {"accountId", "pairId", "size", "price", "direction", "slotId", "makerFeeRate", "takerFeeRate"}
+    missing = required_fields - order_dict.keys()
+    if missing:
+        raise HTTPException(status_code=400, detail=f"Missing order fields: {missing}")
+    return _sign_order_zk(seeds_hex, order_dict)
+
+
+@app.post("/omni/sign-order")
+async def omni_sign_order(req: OmniSignOrderRequest):
+    """First code's /sign-order functionality: return signature only using omni_secret."""
+    _verify_token(req.signer_token)
+    try:
+        seeds = derive_l2_key(req.omni_secret)
+        signature = sign_payload_l2(seeds, req.order)
+        return {"signature": signature}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/omni/sign-transfer")
+async def omni_sign_transfer(req: OmniSignTransferRequest):
+    """Placeholder for transfer signing (first code integration)."""
+    _verify_token(req.signer_token)
+    # TODO: implement transfer signing using zklink_sdk if needed
+    raise HTTPException(status_code=501, detail="Transfer signing not yet implemented")
+
+
+# ==================== EXISTING ENDPOINTS (fully preserved) ====================
+@app.get("/")
+@app.head("/")
+async def root():
+    return JSONResponse({
+        "status": "healthy",
+        "service": "ApeX ZK Signer",
+        "version": "2.0.8"
+    })
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok", "version": "2.0.8"}
+
+
+@app.get("/trading/diagnose")
+@app.post("/trading/diagnose")
+async def trading_diagnose():
+    return {
+        "ok": True,
+        "service": "apex-signer",
+        "status": "healthy",
+        "version": "2.0.8"
+    }
+
+
+@app.post("/trading/start")
+async def trading_start():
+    if not zklink_sdk:
+        raise HTTPException(status_code=500, detail="zklink_sdk not loaded")
+    return {
+        "ok": True,
+        "action": "start",
+        "status": "ready",
+        "message": "Signer service initialized"
+    }
+
+
+@app.post("/trading/stop")
+async def trading_stop():
+    return {
+        "ok": True,
+        "action": "stop",
+        "status": "stopped",
+        "message": "Signer service stopped"
+    }
+
+
+@app.get("/debug")
+@app.post("/debug")
+async def debug_info():
+    routes = [f"{route.path} [{','.join(sorted(list(route.methods))) if route.methods else 'N/A'}]"
+              for route in app.routes if hasattr(route, 'path')]
+    return {
+        "ok": True,
+        "service": "apex-signer",
+        "version": "2.0.8",
+        "available_routes": routes
+    }
+
+
+class OrderRequest(BaseModel):
+    api_key: str
+    api_secret: str
+    passphrase: str
+    seeds: str
+    symbol: str
+    side: str
+    size: float
+    price: float
+    signer_token: str
+    order_type: str = "LIMIT"
+    reduce_only: bool = False
+    time_in_force: str = "GOOD_TIL_CANCEL"
+
+
 @app.post("/sign-order")
 @app.post("/trading/sign-order")
 @app.post("/trading/order")
 async def sign_order(req: OrderRequest):
     _verify_token(req.signer_token)
-    # ... (same logic as before) ...
-    # [Full signing logic from previous version - kept the same]
 
     sym_info = SYMBOL_INFO.get(req.symbol) or SYMBOL_INFO["BTC-USDT"]
     pair_id = sym_info["pair_id"]
@@ -275,7 +335,7 @@ async def sign_order(req: OrderRequest):
             "signature": signature,
             "limitFee": "0.002"
         }
-        
+
         if req.reduce_only:
             request_body["reduceOnly"] = "true"
 
