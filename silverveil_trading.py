@@ -45,7 +45,9 @@ try:
 except ImportError:
     print("❌ Missing pycryptodome. Install: pip install pycryptodome")
     sys.exit(1)
-
+	import inspect
+if not hasattr(inspect, 'getargspec'):
+    inspect.getargspec = inspect.getfullargspec
 # Try to import apexomni SDK for advanced signing (optional)
 try:
     from apexomni import HttpPrivateSign
