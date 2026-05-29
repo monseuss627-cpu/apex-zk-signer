@@ -21,6 +21,7 @@ import traceback
 import math
 import random
 import logging
+import inspect  # <-- added for monkey patch
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Optional, Dict, List, Any, Set, Callable
@@ -38,6 +39,12 @@ from fastapi.responses import HTMLResponse, Response, JSONResponse
 from pydantic import BaseModel
 
 # ------------------------------------------------------------------------------
+# Monkey patch inspect.getargspec for Python 3.11+ compatibility (apexomni SDK fix)
+# ------------------------------------------------------------------------------
+if not hasattr(inspect, 'getargspec'):
+    inspect.getargspec = inspect.getfullargspec
+
+# ------------------------------------------------------------------------------
 # DEPENDENCY CHECK – try to import official SDK, fallback to pure Python
 # ------------------------------------------------------------------------------
 try:
@@ -45,9 +52,7 @@ try:
 except ImportError:
     print("❌ Missing pycryptodome. Install: pip install pycryptodome")
     sys.exit(1)
-	import inspect
-if not hasattr(inspect, 'getargspec'):
-    inspect.getargspec = inspect.getfullargspec
+
 # Try to import apexomni SDK for advanced signing (optional)
 try:
     from apexomni import HttpPrivateSign
