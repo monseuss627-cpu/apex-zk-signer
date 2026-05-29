@@ -21,7 +21,7 @@ import traceback
 import math
 import random
 import logging
-import inspect  # <-- added for monkey patch
+import inspect
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Optional, Dict, List, Any, Set, Callable
@@ -53,16 +53,24 @@ except ImportError:
     print("❌ Missing pycryptodome. Install: pip install pycryptodome")
     sys.exit(1)
 
-# Try to import apexomni SDK for advanced signing (optional)
+# ------------------------------------------------------------------------------
+# Load Apex Omni SDK (updated for current package structure)
+# ------------------------------------------------------------------------------
+omni_signer = None          # No longer used – kept for compatibility
+USE_PRIMARY_SIGNER = False  # Will be set to True if SDK loads successfully
+
 try:
-    from apexomni import HttpPrivateSign
+    from apexomni.http_private_sign import HttpPrivateSign
     from apexomni.constants import APEX_OMNI_HTTP_MAIN, NETWORKID_OMNI_MAIN_ARB
     APEXOMNI_AVAILABLE = True
-    print("✅ Apex Omni SDK loaded – advanced ZK signing enabled")
-except ImportError:
+    print("✅ Apex Omni SDK loaded successfully")
+except ImportError as e:
     APEXOMNI_AVAILABLE = False
-    print("⚠️ Apex Omni SDK not installed – falling back to pure Python ZK signing")
+    print(f"⚠️ Apex Omni SDK not installed: {e}")
     print("   Install with: pip install apexomni")
+except Exception as e:
+    APEXOMNI_AVAILABLE = False
+    print(f"⚠️ Failed to import Apex Omni components: {e}")
 
 # Try to import zklink_sdk for fallback (used by original signer)
 zklink_sdk = None
@@ -108,8 +116,6 @@ orderbook_cache: Dict[str, dict] = {}
 websocket_connections: List[WebSocket] = []
 
 # ---------- Signer globals (from microservice) ----------
-omni_signer = None          # Primary signer from apex omni SDK
-USE_PRIMARY_SIGNER = True   # Can be toggled via env if needed
 SIGNER_SECRET = os.environ.get("SIGNER_SECRET", "vertbacon-signer-key-change-me")
 L2_KEY_CACHE = {}
 
@@ -690,28 +696,18 @@ def _sign_order_zk(seeds: str, order_to_sign: dict) -> str:
     auth_data = signer.sign_musig(tx.get_bytes())
     return auth_data.signature
 
-def _sign_order_primary(seeds: str, order_to_sign: dict) -> str:
-    """Attempt to sign using apex omni SDK (primary method)."""
-    if not omni_signer:
-        raise RuntimeError("Apex omni signer not available")
-    return omni_signer(seeds, order_to_sign)
-
 def sign_order_with_fallback(seeds: str, order_to_sign: dict) -> str:
-    """Unified signing: try primary (apex omni SDK) first, fallback to zklink_sdk on failure, then pure Python."""
-    global USE_PRIMARY_SIGNER
-    if USE_PRIMARY_SIGNER and omni_signer:
-        try:
-            logger.debug("Attempting signing with apex omni SDK")
-            return _sign_order_primary(seeds, order_to_sign)
-        except Exception as e:
-            logger.warning(f"Apex omni signing failed: {e}. Falling back to zklink_sdk")
-    # Fallback to zklink_sdk if available
+    """Unified signing: try primary (apex omni SDK via client) first, fallback to zklink_sdk on failure, then pure Python."""
+    # This function is only used in the standalone signer endpoints.
+    # For ApexClient, the signing happens via the SDK client or fallback directly.
+    # For the microservice endpoints, we still need a mechanism.
+    # We'll use pure Python as ultimate fallback because we don't have access to an HttpPrivateSign instance here.
     if zklink_sdk:
         try:
             return _sign_order_zk(seeds, order_to_sign)
         except Exception as e:
             logger.warning(f"zklink_sdk signing failed: {e}. Falling back to pure Python")
-    # Ultimate fallback: pure Python implementation (from terminal)
+    # Ultimate fallback: pure Python implementation
     return sign_zk_order_pure_python(seeds, order_to_sign)
 
 def sign_zk_order_pure_python(omni_secret_hex: str, order_to_sign: dict) -> str:
@@ -827,6 +823,7 @@ class ApexClient:
         await self._load_creds()
         omni_secret = self.creds.get("apex_omni")
         if not omni_secret:
+            print(f"⚠️ No apex_omni secret for {self.client_id}")
             return
         try:
             self.sdk_client = HttpPrivateSign(
@@ -839,12 +836,9 @@ class ApexClient:
                     'passphrase': self.creds.get("apex_passphrase", "")
                 }
             )
-            if hasattr(self.sdk_client, 'l2Key') and self.sdk_client.l2Key:
-                print(f"✅ SDK L2 key derived for {self.client_id}")
-            else:
-                print(f"⚠️ SDK L2 key not derived for {self.client_id}")
+            print(f"✅ SDK client initialized for {self.client_id}")
         except Exception as e:
-            print(f"⚠️ Failed to init SDK for {self.client_id}: {e}")
+            print(f"⚠️ Failed to init HttpPrivateSign for {self.client_id}: {e}")
             self.sdk_client = None
 
     async def _sign_with_sdk(self, action: str, payload: dict) -> Optional[str]:
@@ -1030,19 +1024,6 @@ class ApexClient:
             price_str = worst.get("data", {}).get("worstPrice") or price_str
         client_oid = f"sv_{int(time.time()*1000)}_{uuid.uuid4().hex[:8]}"
         expiry_sec = int(time.time() + 28 * 24 * 3600)
-        order_payload = {
-            "accountId": int(self.account_id),
-            "slotId": client_oid,
-            "nonce": int(time.time() * 1000),
-            "pairId": sym_info["pair_id"],
-            "size": size_str,
-            "price": price_str,
-            "direction": side.upper(),
-            "makerFeeRate": "0.0002",
-            "takerFeeRate": "0.0005",
-            "expiration": expiry_sec // 3600,
-            "reduceOnly": reduce_only
-        }
         # Use unified signer (microservice style)
         order_to_sign = {
             "accountId": int(self.account_id),
@@ -1055,10 +1036,21 @@ class ApexClient:
             "makerFeeRate": "0.0002",
             "takerFeeRate": "0.0005"
         }
-        try:
-            zk_sig = sign_order_with_fallback(self.creds["apex_omni"], order_to_sign)
-        except Exception as e:
-            return {"success": False, "error": f"ZK signing failed: {str(e)}"}
+        # Try SDK signing first
+        if self.sdk_client:
+            try:
+                zk_sig = self.sdk_client.sign_order(order_to_sign)
+            except Exception as e:
+                print(f"SDK order signing failed: {e}, falling back")
+                zk_sig = None
+        else:
+            zk_sig = None
+        if not zk_sig:
+            # Fallback to zklink_sdk or pure Python
+            try:
+                zk_sig = sign_order_with_fallback(self.creds["apex_omni"], order_to_sign)
+            except Exception as e:
+                return {"success": False, "error": f"ZK signing failed: {str(e)}"}
         body = {
             "symbol": symbol,
             "side": side.upper(),
@@ -1110,19 +1102,6 @@ class ApexClient:
             price_str = _price_to_precision(price or 0, sym_info["price_step"])
             client_oid = f"sv_{int(time.time()*1000)}_{uuid.uuid4().hex[:8]}"
             expiry_sec = int(time.time() + 28 * 24 * 3600)
-            order_payload = {
-                "accountId": int(self.account_id),
-                "slotId": client_oid,
-                "nonce": int(time.time() * 1000),
-                "pairId": sym_info["pair_id"],
-                "size": size_str,
-                "price": price_str,
-                "direction": side.upper(),
-                "makerFeeRate": "0.0002",
-                "takerFeeRate": "0.0005",
-                "expiration": expiry_sec // 3600,
-                "reduceOnly": reduce_only
-            }
             order_to_sign = {
                 "accountId": int(self.account_id),
                 "slotId": client_oid,
@@ -1134,10 +1113,19 @@ class ApexClient:
                 "makerFeeRate": "0.0002",
                 "takerFeeRate": "0.0005"
             }
-            try:
-                zk_sig = sign_order_with_fallback(self.creds["apex_omni"], order_to_sign)
-            except Exception as e:
-                return {"success": False, "error": f"ZK signing failed for {symbol}: {e}"}
+            # Try SDK signing first
+            if self.sdk_client:
+                try:
+                    zk_sig = self.sdk_client.sign_order(order_to_sign)
+                except:
+                    zk_sig = None
+            else:
+                zk_sig = None
+            if not zk_sig:
+                try:
+                    zk_sig = sign_order_with_fallback(self.creds["apex_omni"], order_to_sign)
+                except Exception as e:
+                    return {"success": False, "error": f"ZK signing failed for {symbol}: {e}"}
             order_body = {
                 "symbol": symbol,
                 "side": side.upper(),
@@ -1188,14 +1176,12 @@ class ApexClient:
         else:
             payload["clientOrderId"] = client_order_id
             endpoint = "/api/v3/delete-client-order-id"
-        # We need ZK signature for cancel – use pure Python fallback for simplicity
+        # We need ZK signature for cancel – use SDK if available
+        if not self.sdk_client:
+            await self._init_sdk()
+        if not self.sdk_client:
+            return {"success": False, "error": "Cancel order requires SDK (ZK signing not available in fallback)"}
         try:
-            # Reuse pure Python signing for cancel (not fully implemented; SDK preferred)
-            # For now, fallback to SDK only.
-            if not self.sdk_client:
-                await self._init_sdk()
-            if not self.sdk_client:
-                return {"success": False, "error": "Cancel order requires SDK (ZK signing not available in fallback)"}
             zk_sig = self.sdk_client.sign_cancel_order(payload)
         except Exception as e:
             return {"success": False, "error": f"Cancellation signing failed: {e}"}
@@ -1746,17 +1732,9 @@ async def get_okx_klines(symbol: str, timeframe: str = "1h", limit: int = 300) -
 # =============================================================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global omni_signer, USE_PRIMARY_SIGNER, zklink_sdk
-    # Load fallback zklink_sdk (already attempted at top)
-    # Load primary apex omni signer
-    try:
-        from apexomni.signer import sign_order as omni_sign_order
-        omni_signer = omni_sign_order
-        print("✅ Primary apex omni signer loaded")
-    except (ImportError, AttributeError) as e:
-        print(f"⚠️ Could not load apex omni signer: {e}. Will use fallback only.")
-        omni_signer = None
-        USE_PRIMARY_SIGNER = False
+    global zklink_sdk
+    # No need to load separate signer – the SDK is loaded at top via HttpPrivateSign.
+    # The primary signing is handled inside ApexClient via the SDK client.
     # Start terminal background tasks
     okx_manager = OKXOrderBookManager()
     ws_task = asyncio.create_task(okx_manager.start())
@@ -2225,18 +2203,18 @@ async def omni_sign_transfer(req: OmniSignTransferRequest):
     _verify_token(req.signer_token)
     raise HTTPException(status_code=501, detail="Transfer signing not yet implemented")
 
-@app.get("/signer-status")  # was "/" in original signer, now moved to avoid conflict with dashboard
+@app.get("/signer-status")
 @app.head("/signer-status")
 async def signer_status():
     return JSONResponse({
         "status": "healthy",
         "service": "ApeX ZK Signer",
         "version": "2.0.9",
-        "primary_signer": "apex omni SDK" if omni_signer else "unavailable",
+        "primary_signer": "apex omni SDK (HttpPrivateSign)" if APEXOMNI_AVAILABLE else "unavailable",
         "fallback_signer": "zklink_sdk" if zklink_sdk else "unavailable"
     })
 
-@app.get("/health")  # merged health
+@app.get("/health")
 async def health():
     return {
         "status": "online",
@@ -2244,7 +2222,7 @@ async def health():
         "database": DATABASE_PATH,
         "zk_signing": "SDK+fallback",
         "terminal": "active",
-        "signer_primary": omni_signer is not None,
+        "signer_primary": APEXOMNI_AVAILABLE,
         "signer_fallback": zklink_sdk is not None
     }
 
@@ -2260,13 +2238,13 @@ async def trading_diagnose():
 
 @app.post("/trading/start")
 async def trading_start():
-    if not zklink_sdk and not omni_signer:
+    if not zklink_sdk and not APEXOMNI_AVAILABLE:
         raise HTTPException(status_code=500, detail="No signing method available")
     return {
         "ok": True,
         "action": "start",
         "status": "ready",
-        "message": "Signer service initialized (primary: apex omni, fallback: zklink)"
+        "message": "Signer service initialized (primary: apex omni SDK, fallback: zklink)"
     }
 
 @app.post("/trading/stop")
@@ -2288,7 +2266,7 @@ async def debug_info():
         "service": "apex-signer",
         "version": "2.0.9",
         "available_routes": routes,
-        "signing_primary_available": omni_signer is not None,
+        "signing_primary_available": APEXOMNI_AVAILABLE,
         "signing_fallback_available": zklink_sdk is not None
     }
 
@@ -2725,7 +2703,7 @@ HTML_CONTENT = """<!DOCTYPE html>
                  </tr>`;
             });
         }
-        ordersHtml += ` </tbody> </table> </div>`;
+        ordersHtml += ` </tbody> <tr> </div>`;
         document.getElementById('brokerOrdersTable').innerHTML = ordersHtml;
 
         // Positions Table
@@ -2749,7 +2727,7 @@ HTML_CONTENT = """<!DOCTYPE html>
         // Balances Table
         let balHtml = `<div style="overflow-x: auto;"> <table border="1"> <thead> <tr><th>Account</th><th>Total Equity</th><th>Available</th><th>Unrealized PnL</th></tr> </thead> <tbody>`;
         const balances = data.balances || [];
-        if (balances.length === 0) balHtml += ` <tr><td colspan="4">No balance data yet<tr>`;
+        if (balances.length === 0) balHtml += ` <td><td colspan="4">No balance data yet</td></tr>`;
         else {
             balances.forEach(b => {
                 balHtml += ` <tr>
@@ -2760,7 +2738,7 @@ HTML_CONTENT = """<!DOCTYPE html>
                  </tr>`;
             });
         }
-        balHtml += ` </tbody> </tr> </div>`;
+        balHtml += ` </tbody> </table> </div>`;
         document.getElementById('brokerBalancesTable').innerHTML = balHtml;
     }
 
