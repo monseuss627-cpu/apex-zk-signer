@@ -27,7 +27,7 @@ RUN python -c "from apexomni import HttpPrivateSign; print('✅ apexomni SDK rea
     echo "⚠️ apexomni SDK not available – falling back to pure Python ZK signing"
 
 # Copy all application source files
-COPY signer_service.py silverveil_trading.py silverveil_backend.py supervisord.conf ./
+COPY signer_service.py silverveil_backend.py supervisord.conf ./
 
 # Environment variables (kept from original)
 ENV PORT=8099
