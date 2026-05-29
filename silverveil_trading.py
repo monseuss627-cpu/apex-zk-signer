@@ -1394,7 +1394,7 @@ async def broker_sync_loop():
             await asyncio.sleep(10)
 
 # =============================================================================
-# OKX ORDER BOOK MANAGER (with compatibility fix)
+# OKX ORDER BOOK MANAGER (modernized, no loop parameter)
 # =============================================================================
 class OKXOrderBookManager:
     def __init__(self):
@@ -1406,61 +1406,64 @@ class OKXOrderBookManager:
         self.running = True
 
     async def connect_and_subscribe(self):
+        """Connect to OKX WebSocket with modern best practices"""
         try:
-            # For websockets >= 10.0, no loop parameter needed.
-            # For older versions, we catch TypeError and fallback to passing loop.
             self.ws = await websockets.connect(
                 OKX_WS_URL,
                 ping_interval=20,
                 ping_timeout=10,
-                close_timeout=5
+                close_timeout=5,
+                # Do NOT pass 'loop' - it's deprecated and removed
             )
             print("✅ Connected to OKX WebSocket")
-            subscribe_args = [{"channel": "books", "instId": SYMBOL_TO_OKX[sym]} for sym in SUPPORTED_SYMBOLS]
-            await self.ws.send(json.dumps({"op": "subscribe", "args": subscribe_args}))
+            
+            subscribe_args = [
+                {"channel": "books", "instId": SYMBOL_TO_OKX[sym]} 
+                for sym in SUPPORTED_SYMBOLS
+            ]
+            
+            await self.ws.send(json.dumps({
+                "op": "subscribe", 
+                "args": subscribe_args
+            }))
+            
             print(f"📚 Subscribed to order books for {SUPPORTED_SYMBOLS}")
             self.reconnect_delay = 1
             return True
-        except TypeError as e:
-            if "loop" in str(e):
-                # Fallback for very old websockets (pre-10.0)
-                loop = asyncio.get_event_loop()
-                self.ws = await websockets.connect(
-                    OKX_WS_URL,
-                    loop=loop,
-                    ping_interval=20,
-                    ping_timeout=10,
-                    close_timeout=5
-                )
-                print("✅ Connected to OKX WebSocket (using loop fallback)")
-                subscribe_args = [{"channel": "books", "instId": SYMBOL_TO_OKX[sym]} for sym in SUPPORTED_SYMBOLS]
-                await self.ws.send(json.dumps({"op": "subscribe", "args": subscribe_args}))
-                print(f"📚 Subscribed to order books for {SUPPORTED_SYMBOLS}")
-                self.reconnect_delay = 1
-                return True
-            else:
-                raise
+
         except Exception as e:
             print(f"❌ WebSocket connection failed: {e}")
+            if self.ws:
+                try:
+                    await self.ws.close()
+                except:
+                    pass
+                self.ws = None
             return False
 
     async def process_messages(self):
         if not self.ws:
             return
+            
         try:
             async for message in self.ws:
                 try:
                     data = json.loads(message)
                     if "arg" in data and data["arg"].get("channel") == "books":
                         inst_id = data["arg"]["instId"]
-                        symbol = next((sym for sym, okx_id in SYMBOL_TO_OKX.items() if okx_id == inst_id), None)
+                        symbol = next((sym for sym, okx_id in SYMBOL_TO_OKX.items() 
+                                     if okx_id == inst_id), None)
                         if not symbol:
                             continue
+
                         book_data = data.get("data", [{}])[0]
                         action = book_data.get("action", "")
+
                         if symbol not in self.orderbooks:
                             self.orderbooks[symbol] = {"bids": {}, "asks": {}, "seq_id": 0}
+
                         book = self.orderbooks[symbol]
+
                         if action == "snapshot":
                             book["bids"] = {float(b[0]): float(b[1]) for b in book_data.get("bids", [])}
                             book["asks"] = {float(a[0]): float(a[1]) for a in book_data.get("asks", [])}
@@ -1468,31 +1471,46 @@ class OKXOrderBookManager:
                             print(f"📖 Snapshot for {symbol}: {len(book['bids'])} bids, {len(book['asks'])} asks")
                         elif action == "update":
                             for bid in book_data.get("bids", []):
-                                price = float(bid[0]); size = float(bid[1])
+                                price, size = float(bid[0]), float(bid[1])
                                 if size == 0:
                                     book["bids"].pop(price, None)
                                 else:
                                     book["bids"][price] = size
                             for ask in book_data.get("asks", []):
-                                price = float(ask[0]); size = float(ask[1])
+                                price, size = float(ask[0]), float(ask[1])
                                 if size == 0:
                                     book["asks"].pop(price, None)
                                 else:
                                     book["asks"][price] = size
-                            if "seqId" in book_data:
-                                book["seq_id"] = int(book_data["seqId"])
+
+                        # Broadcast top levels
                         if action in ("snapshot", "update"):
                             sorted_bids = sorted(book["bids"].items(), key=lambda x: x[0], reverse=True)[:self.broadcast_levels]
                             sorted_asks = sorted(book["asks"].items(), key=lambda x: x[0])[:self.broadcast_levels]
+
                             top_bids = [[p, q] for p, q in sorted_bids]
                             top_asks = [[p, q] for p, q in sorted_asks]
                             last_price = top_bids[0][0] if top_bids else 0
+
                             latest_prices[symbol] = last_price
-                            orderbook_cache[symbol] = {"bids": top_bids, "asks": top_asks, "last_price": last_price, "timestamp": time.time()}
+                            orderbook_cache[symbol] = {
+                                "bids": top_bids, 
+                                "asks": top_asks, 
+                                "last_price": last_price, 
+                                "timestamp": time.time()
+                            }
+
+                            # Broadcast to connected clients
                             if websocket_connections:
-                                broadcast_data = {"type": "orderbook", "symbol": symbol, "last_price": last_price, "bids": top_bids, "asks": top_asks}
+                                broadcast_data = {
+                                    "type": "orderbook",
+                                    "symbol": symbol,
+                                    "last_price": last_price,
+                                    "bids": top_bids,
+                                    "asks": top_asks
+                                }
                                 disconnected = []
-                                for ws_client in websocket_connections:
+                                for ws_client in websocket_connections[:]:
                                     try:
                                         await ws_client.send_json(broadcast_data)
                                     except:
@@ -1500,30 +1518,27 @@ class OKXOrderBookManager:
                                 for ws_client in disconnected:
                                     if ws_client in websocket_connections:
                                         websocket_connections.remove(ws_client)
-                    elif "event" in data:
-                        if data["event"] == "subscribe":
-                            print(f"✅ Subscribed to {data.get('arg', {})}")
-                        elif data["event"] == "error":
-                            print(f"❌ Subscription error: {data}")
-                except:
-                    continue
+
+                except Exception as inner_e:
+                    continue  # Skip malformed messages
+
         except websockets.exceptions.ConnectionClosed:
-            print("⚠️ WebSocket connection closed")
+            print("⚠️ OKX WebSocket connection closed")
         except Exception as e:
-            print(f"⚠️ WebSocket error: {e}")
+            print(f"⚠️ WebSocket processing error: {e}")
 
     async def start(self):
         while self.running:
             try:
                 if await self.connect_and_subscribe():
                     await self.process_messages()
-                    if self.ws:
-                        try: await self.ws.close()
-                        except: pass
-                        self.ws = None
-                print(f"🔄 Reconnecting in {self.reconnect_delay} seconds...")
+                else:
+                    await asyncio.sleep(self.reconnect_delay)
+                
+                print(f"🔄 Reconnecting in {self.reconnect_delay}s...")
                 await asyncio.sleep(self.reconnect_delay)
                 self.reconnect_delay = min(self.reconnect_delay * 2, self.max_reconnect_delay)
+                
             except Exception as e:
                 print(f"❌ Fatal error in OKX WebSocket manager: {e}")
                 await asyncio.sleep(self.reconnect_delay)
@@ -2734,7 +2749,7 @@ HTML_CONTENT = """<!DOCTYPE html>
         // Balances Table
         let balHtml = `<div style="overflow-x: auto;"> <table border="1"> <thead> <tr><th>Account</th><th>Total Equity</th><th>Available</th><th>Unrealized PnL</th></tr> </thead> <tbody>`;
         const balances = data.balances || [];
-        if (balances.length === 0) balHtml += ` <tr><td colspan="4">No balance data yet</td></tr>`;
+        if (balances.length === 0) balHtml += ` <tr><td colspan="4">No balance data yet<tr>`;
         else {
             balances.forEach(b => {
                 balHtml += ` <tr>
@@ -2745,7 +2760,7 @@ HTML_CONTENT = """<!DOCTYPE html>
                  </tr>`;
             });
         }
-        balHtml += ` </tbody> </table> </div>`;
+        balHtml += ` </tbody> </tr> </div>`;
         document.getElementById('brokerBalancesTable').innerHTML = balHtml;
     }
 
