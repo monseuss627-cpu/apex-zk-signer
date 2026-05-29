@@ -14,8 +14,12 @@ case "$RUN_MODE" in
         echo "Starting Signer Service (signer_service.py)"
         exec python signer_service.py
         ;;
-    supervisor|*)
+    supervisor)
         echo "Starting all services via supervisord (signer + trading)"
+        exec supervisord -c supervisord.conf
+        ;;
+    *)
+        echo "Unknown RUN_MODE=$RUN_MODE. Defaulting to supervisor."
         exec supervisord -c supervisord.conf
         ;;
 esac

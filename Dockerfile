@@ -21,8 +21,10 @@ RUN pip install --no-cache-dir -r requirements.txt && \
         supervisor
 
 # Test imports (do not break the build)
-RUN python -c "from apexpro import zklink_sdk; print('✅ apexpro SDK ready')" 2>&1 || echo "⚠️ apexpro SDK not available"
-RUN python -c "from apexomni import HttpPrivateSign; print('✅ apexomni SDK ready')" 2>&1 || echo "⚠️ apexomni SDK not available – falling back to pure Python ZK signing"
+RUN python -c "from apexpro import zklink_sdk; print('✅ apexpro SDK ready')" 2>&1 || \
+    echo "⚠️ apexpro SDK not available"
+RUN python -c "from apexomni import HttpPrivateSign; print('✅ apexomni SDK ready')" 2>&1 || \
+    echo "⚠️ apexomni SDK not available – falling back to pure Python ZK signing"
 
 # Copy all application source files
 COPY signer_service.py silverveil_trading.py silverveil_backend.py supervisord.conf ./
@@ -30,7 +32,10 @@ COPY signer_service.py silverveil_trading.py silverveil_backend.py supervisord.c
 # Environment variables (kept from original)
 ENV PORT=8099
 ENV SIGNER_SECRET=vertbacon-prod-signer-2026
-ENV RUN_MODE=supervisor   # Possible values: trading, backend, signer, supervisor
+ENV RUN_MODE=supervisor
+
+# Possible RUN_MODE values: trading, backend, signer, supervisor
+# Supervisor runs both signer_service and silverveil_trading
 
 EXPOSE 8099
 
