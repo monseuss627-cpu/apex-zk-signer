@@ -1387,7 +1387,7 @@ async def broker_sync_loop():
             await asyncio.sleep(10)
 
 # =============================================================================
-# OKX ORDER BOOK MANAGER (unchanged)
+# OKX ORDER BOOK MANAGER (with compatibility fix)
 # =============================================================================
 class OKXOrderBookManager:
     def __init__(self):
@@ -1400,13 +1400,39 @@ class OKXOrderBookManager:
 
     async def connect_and_subscribe(self):
         try:
-            self.ws = await websockets.connect(OKX_WS_URL, ping_interval=20, ping_timeout=10, close_timeout=5)
+            # For websockets >= 10.0, no loop parameter needed.
+            # For older versions, we catch TypeError and fallback to passing loop.
+            self.ws = await websockets.connect(
+                OKX_WS_URL,
+                ping_interval=20,
+                ping_timeout=10,
+                close_timeout=5
+            )
             print("✅ Connected to OKX WebSocket")
             subscribe_args = [{"channel": "books", "instId": SYMBOL_TO_OKX[sym]} for sym in SUPPORTED_SYMBOLS]
             await self.ws.send(json.dumps({"op": "subscribe", "args": subscribe_args}))
             print(f"📚 Subscribed to order books for {SUPPORTED_SYMBOLS}")
             self.reconnect_delay = 1
             return True
+        except TypeError as e:
+            if "loop" in str(e):
+                # Fallback for very old websockets (pre-10.0)
+                loop = asyncio.get_event_loop()
+                self.ws = await websockets.connect(
+                    OKX_WS_URL,
+                    loop=loop,
+                    ping_interval=20,
+                    ping_timeout=10,
+                    close_timeout=5
+                )
+                print("✅ Connected to OKX WebSocket (using loop fallback)")
+                subscribe_args = [{"channel": "books", "instId": SYMBOL_TO_OKX[sym]} for sym in SUPPORTED_SYMBOLS]
+                await self.ws.send(json.dumps({"op": "subscribe", "args": subscribe_args}))
+                print(f"📚 Subscribed to order books for {SUPPORTED_SYMBOLS}")
+                self.reconnect_delay = 1
+                return True
+            else:
+                raise
         except Exception as e:
             print(f"❌ WebSocket connection failed: {e}")
             return False
@@ -2662,57 +2688,57 @@ HTML_CONTENT = """<!DOCTYPE html>
 
     function updateBrokerDisplays(data) {
         // Orders Table
-        let ordersHtml = ` <div style="overflow-x: auto;"><tr> <tr><th>ID</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Price</th><th>Status</th></tr>`;
+        let ordersHtml = ` <div style="overflow-x: auto;"> <table border="1"> <thead> <tr><th>ID</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Price</th><th>Status</th></tr> </thead> <tbody>`;
         const orders = data.orders || [];
-        if (orders.length === 0) ordersHtml += `<tr><td colspan="6">No open orders</td></tr>`;
+        if (orders.length === 0) ordersHtml += ` <tr><td colspan="6">No open orders</td></tr>`;
         else {
             orders.slice(0,10).forEach(o => {
-                ordersHtml += `<tr>
+                ordersHtml += ` <tr>
                     <td>${o.order_id ? o.order_id.slice(0,8) : '-'}</td>
                     <td>${o.symbol}</td>
                     <td style="color:${o.side === 'BUY' ? '#00bcd4' : '#ef5350'}">${o.side}</td>
                     <td>${o.quantity}</td>
                     <td>${o.price ? parseFloat(o.price).toFixed(2) : '-'}</td>
                     <td>${o.status}</td>
-                </tr>`;
+                 </tr>`;
             });
         }
-        ordersHtml += `</table></div>`;
+        ordersHtml += ` </tbody> </table> </div>`;
         document.getElementById('brokerOrdersTable').innerHTML = ordersHtml;
 
         // Positions Table
-        let posHtml = `<div style="overflow-x: auto;"> able<table border="1">\n <thead>\n<tr>\n<th>Symbol</th>\n<th>Side</th>\n<th>Qty</th>\n<th>Entry</th>\n<th>Unrealized PnL</th>\n</tr>\n</thead>\n<tbody>`;
+        let posHtml = `<div style="overflow-x: auto;"> <table border="1"> <thead> <tr><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>Unrealized PnL</th></tr> </thead> <tbody>`;
         const positions = data.positions || [];
-        if (positions.length === 0) posHtml += `<tr><td colspan="5">No open positions</td></tr>`;
+        if (positions.length === 0) posHtml += ` <tr><td colspan="5">No open positions</td></tr>`;
         else {
             positions.forEach(p => {
-                posHtml += `<tr>
+                posHtml += ` <tr>
                     <td>${p.symbol}</td>
                     <td style="color:${p.side === 'LONG' ? '#00bcd4' : '#ef5350'}">${p.side}</td>
                     <td>${p.quantity}</td>
                     <td>${parseFloat(p.entry_price).toFixed(2)}</td>
                     <td style="color:${p.unrealized_pnl >= 0 ? '#00bcd4' : '#ef5350'}">${parseFloat(p.unrealized_pnl).toFixed(2)}</td>
-                </tr>`;
+                 </tr>`;
             });
         }
-        posHtml += `</tbody></table></div>`;
+        posHtml += ` </tbody> </table> </div>`;
         document.getElementById('brokerPositionsTable').innerHTML = posHtml;
 
         // Balances Table
-        let balHtml = `<div style="overflow-x: auto;"><table border="1"><thead><tr><th>Account</th><th>Total Equity</th><th>Available</th><th>Unrealized PnL</th></tr></thead><tbody>`;
+        let balHtml = `<div style="overflow-x: auto;"> <table border="1"> <thead> <tr><th>Account</th><th>Total Equity</th><th>Available</th><th>Unrealized PnL</th></tr> </thead> <tbody>`;
         const balances = data.balances || [];
-        if (balances.length === 0) balHtml += `<tr><td colspan="4">No balance data yet</td></tr>`;
+        if (balances.length === 0) balHtml += ` <tr><td colspan="4">No balance data yet</td></tr>`;
         else {
             balances.forEach(b => {
-                balHtml += `<tr>
+                balHtml += ` <tr>
                     <td>${b.account_id ? b.account_id.slice(0,8) : '-'}</td>
                     <td>$${parseFloat(b.total_equity).toFixed(2)}</td>
                     <td>$${parseFloat(b.available).toFixed(2)}</td>
                     <td style="color:${b.unrealized_pnl >= 0 ? '#00bcd4' : '#ef5350'}">$${parseFloat(b.unrealized_pnl).toFixed(2)}</td>
-                </tr>`;
+                 </tr>`;
             });
         }
-        balHtml += `</tbody></table></div>`;
+        balHtml += ` </tbody> </table> </div>`;
         document.getElementById('brokerBalancesTable').innerHTML = balHtml;
     }
 
