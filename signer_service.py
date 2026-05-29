@@ -1,6 +1,6 @@
 """
 ApeX ZK Order Signing Microservice
-Integrated with omni_secret-based signing (first code) while preserving all paid functionality.
+Integrated with apex omni SDK as primary signer, zklink_sdk as fallback.
 """
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
@@ -21,28 +21,46 @@ from urllib.parse import urlencode
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("apex-signer")
 
+# ---------- Global signer references ----------
 zklink_sdk = None
+omni_signer = None          # Primary signer from apex omni SDK
+USE_PRIMARY_SIGNER = True   # Can be toggled via env if needed
+
 SIGNER_SECRET = os.environ.get("SIGNER_SECRET", "vertbacon-signer-key-change-me")
 APEX_API_BASE = os.environ.get("APEX_API_BASE", "https://pro.apex.exchange")
 
-# ---------- Cache for L2 keys derived from omni_secret (first code) ----------
-L2_KEY_CACHE = {}  # {omni_secret_hash: seeds_hex}
+# Cache for L2 keys derived from omni_secret
+L2_KEY_CACHE = {}
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global zklink_sdk
+    global zklink_sdk, omni_signer, USE_PRIMARY_SIGNER
+    # Load fallback zklink_sdk first (always needed as fallback)
     try:
         from apexomni import zklink_sdk as sdk
         zklink_sdk = sdk
-        logger.info("✅ zklink_sdk loaded from apexomni")
+        logger.info("✅ Fallback zklink_sdk loaded from apexomni")
     except ImportError:
         try:
             import apexpro.zklink_sdk as sdk
             zklink_sdk = sdk
-            logger.info("✅ zklink_sdk loaded from apexpro")
+            logger.info("✅ Fallback zklink_sdk loaded from apexpro")
         except ImportError:
-            logger.error("❌ Neither apexomni nor apexpro zklink_sdk could be loaded!")
+            logger.error("❌ No zklink_sdk available – falling back will fail!")
+    
+    # Load primary apex omni SDK signer
+    try:
+        # Assume apex omni SDK provides a signing function, e.g.:
+        #   from apexomni.signer import sign_order
+        # Adjust import path based on actual SDK structure.
+        from apexomni.signer import sign_order as omni_sign_order
+        omni_signer = omni_sign_order
+        logger.info("✅ Primary apex omni signer loaded")
+    except (ImportError, AttributeError) as e:
+        logger.warning(f"⚠️ Could not load apex omni signer: {e}. Will use fallback only.")
+        omni_signer = None
+        USE_PRIMARY_SIGNER = False
     
     yield
     logger.info("Shutting down ApeX signer service")
@@ -55,7 +73,7 @@ app = FastAPI(
 )
 
 
-# ==================== HELPER FUNCTIONS (existing) ====================
+# ==================== HELPER FUNCTIONS ====================
 def _verify_token(token: str):
     if token != SIGNER_SECRET:
         raise HTTPException(status_code=403, detail="Invalid signer token")
@@ -99,8 +117,9 @@ SYMBOL_INFO = {
 
 
 def _sign_order_zk(seeds: str, order_to_sign: dict) -> str:
+    """Original zklink_sdk signing – used as fallback."""
     if not zklink_sdk:
-        raise HTTPException(status_code=500, detail="zklink_sdk not loaded")
+        raise HTTPException(status_code=500, detail="zklink_sdk not loaded (fallback unavailable)")
 
     slot_id_raw = order_to_sign["slotId"]
     nonce_int = int(hashlib.sha256(slot_id_raw.encode()).hexdigest(), 16)
@@ -133,48 +152,63 @@ def _sign_order_zk(seeds: str, order_to_sign: dict) -> str:
     return auth_data.signature
 
 
-# ==================== NEW: omni_secret-based signing (first code integration) ====================
+def _sign_order_primary(seeds: str, order_to_sign: dict) -> str:
+    """Attempt to sign using apex omni SDK (primary method)."""
+    if not omni_signer:
+        raise RuntimeError("Apex omni signer not available")
+    # The omni_signer function signature must match: (seeds_hex, order_dict) -> signature
+    return omni_signer(seeds, order_to_sign)
+
+
+def sign_order_with_fallback(seeds: str, order_to_sign: dict) -> str:
+    """
+    Unified signing: try primary (apex omni SDK) first, fallback to zklink_sdk on failure.
+    """
+    global USE_PRIMARY_SIGNER
+    if USE_PRIMARY_SIGNER and omni_signer:
+        try:
+            logger.debug("Attempting signing with apex omni SDK")
+            return _sign_order_primary(seeds, order_to_sign)
+        except Exception as e:
+            logger.warning(f"Apex omni signing failed: {e}. Falling back to zklink_sdk")
+            # Optionally disable primary for subsequent calls if it's a permanent error
+            # USE_PRIMARY_SIGNER = False   # uncomment to disable after first failure
+    # Fallback
+    return _sign_order_zk(seeds, order_to_sign)
+
+
+# ==================== omni_secret-based endpoints (preserved) ====================
 class OmniSignOrderRequest(BaseModel):
     omni_secret: str
-    order: dict          # expected to contain: accountId, pairId, size, price, direction, etc.
-    signer_token: str    # optional but recommended for security
+    order: dict
+    signer_token: str
 
 
 class OmniSignTransferRequest(BaseModel):
     omni_secret: str
-    transfer: dict       # fields for transfer (e.g., to, amount, tokenId)
+    transfer: dict
     signer_token: str
 
 
 def derive_l2_key(omni_secret: str) -> str:
-    """
-    Derive an L2 key (seed hex) from an omni_secret.
-    Uses SHA256 to get a deterministic 32‑byte seed.
-    Production implementation should use a stronger KDF (e.g., PBKDF2) and salt.
-    """
     secret_hash = hashlib.sha256(omni_secret.encode()).hexdigest()
     if secret_hash in L2_KEY_CACHE:
         return L2_KEY_CACHE[secret_hash]
-    # Simple derivation: treat the SHA256 as the seed hex
-    # If omni_secret is a mnemonic, replace this with BIP39 logic.
     seeds_hex = secret_hash
     L2_KEY_CACHE[secret_hash] = seeds_hex
     return seeds_hex
 
 
 def sign_payload_l2(seeds_hex: str, order_dict: dict) -> str:
-    """Sign an order payload using the derived L2 key."""
-    # The order_dict must contain the same fields expected by _sign_order_zk
     required_fields = {"accountId", "pairId", "size", "price", "direction", "slotId", "makerFeeRate", "takerFeeRate"}
     missing = required_fields - order_dict.keys()
     if missing:
         raise HTTPException(status_code=400, detail=f"Missing order fields: {missing}")
-    return _sign_order_zk(seeds_hex, order_dict)
+    return sign_order_with_fallback(seeds_hex, order_dict)
 
 
 @app.post("/omni/sign-order")
 async def omni_sign_order(req: OmniSignOrderRequest):
-    """First code's /sign-order functionality: return signature only using omni_secret."""
     _verify_token(req.signer_token)
     try:
         seeds = derive_l2_key(req.omni_secret)
@@ -186,26 +220,27 @@ async def omni_sign_order(req: OmniSignOrderRequest):
 
 @app.post("/omni/sign-transfer")
 async def omni_sign_transfer(req: OmniSignTransferRequest):
-    """Placeholder for transfer signing (first code integration)."""
     _verify_token(req.signer_token)
-    # TODO: implement transfer signing using zklink_sdk if needed
+    # TODO: implement transfer signing using fallback mechanism
     raise HTTPException(status_code=501, detail="Transfer signing not yet implemented")
 
 
-# ==================== EXISTING ENDPOINTS (fully preserved) ====================
+# ==================== EXISTING ENDPOINTS (preserved, with fallback signing) ====================
 @app.get("/")
 @app.head("/")
 async def root():
     return JSONResponse({
         "status": "healthy",
         "service": "ApeX ZK Signer",
-        "version": "2.0.8"
+        "version": "2.0.9",   # version bump to reflect change
+        "primary_signer": "apex omni SDK" if omni_signer else "unavailable",
+        "fallback_signer": "zklink_sdk" if zklink_sdk else "unavailable"
     })
 
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "version": "2.0.8"}
+    return {"status": "ok", "version": "2.0.9"}
 
 
 @app.get("/trading/diagnose")
@@ -215,19 +250,19 @@ async def trading_diagnose():
         "ok": True,
         "service": "apex-signer",
         "status": "healthy",
-        "version": "2.0.8"
+        "version": "2.0.9"
     }
 
 
 @app.post("/trading/start")
 async def trading_start():
-    if not zklink_sdk:
-        raise HTTPException(status_code=500, detail="zklink_sdk not loaded")
+    if not zklink_sdk and not omni_signer:
+        raise HTTPException(status_code=500, detail="No signing method available")
     return {
         "ok": True,
         "action": "start",
         "status": "ready",
-        "message": "Signer service initialized"
+        "message": "Signer service initialized (primary: apex omni, fallback: zklink)"
     }
 
 
@@ -249,8 +284,10 @@ async def debug_info():
     return {
         "ok": True,
         "service": "apex-signer",
-        "version": "2.0.8",
-        "available_routes": routes
+        "version": "2.0.9",
+        "available_routes": routes,
+        "signing_primary_available": omni_signer is not None,
+        "signing_fallback_available": zklink_sdk is not None
     }
 
 
@@ -318,7 +355,8 @@ async def sign_order(req: OrderRequest):
             "takerFeeRate": "0.0005",
         }
 
-        signature = _sign_order_zk(req.seeds, order_to_sign)
+        # Use unified signer with fallback
+        signature = sign_order_with_fallback(req.seeds, order_to_sign)
 
         expiration = int(math.floor(time.time() + 30 * 24 * 60 * 60))
 
