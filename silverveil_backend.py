@@ -10,6 +10,7 @@ SilverVeil Trading Terminal - FULL UI + REAL DATA (OKX Perpetual Swaps)
 - FULL ZK INTEGRATION (official apexomni SDK) for orders, transfers, withdrawals, batch orders
 - Batch order support: EA can place multiple signals in one request
 - Transfer UI: Funding ↔ Perpetual
+- Balance‑aware order sizing with leverage preview
 """
 
 import sys
@@ -372,10 +373,12 @@ class TradeRequest(BaseModel):
     client_id: str
     symbol: str
     side: str
-    size: float
-    price: float
+    size: Optional[float] = None          # auto-calc if None + risk_percent given
+    price: Optional[float] = None
     tp: Optional[float] = None
     sl: Optional[float] = None
+    risk_percent: Optional[float] = None  # new: if provided, auto-calc size
+    leverage: Optional[float] = None      # override default leverage for sizing
     dry_run: bool = False
 
 class EASettings(BaseModel):
@@ -598,7 +601,7 @@ def clear_active_signal_db(client_id: str):
     conn.close()
 
 # =============================================================================
-# APEX CLIENT WITH ADVANCED ZK SIGNING (using official SDK when available)
+# APEX CLIENT WITH ADVANCED ZK SIGNING + BALANCE‑AWARE ORDER SIZING
 # =============================================================================
 
 SYMBOL_INFO = {"BTC-USDT": {"pair_id": 50001, "price_step": "0.1", "size_step": "0.001"},
@@ -687,6 +690,7 @@ class ApexClient:
         self.creds = None
         self.account_id = None
         self.sdk_client = None
+        self._balance_cache = None   # for get_balance caching
 
     async def _load_creds(self):
         if not self.creds:
@@ -814,14 +818,182 @@ class ApexClient:
                     await asyncio.sleep(0.5 * (attempt + 1))
 
     # ===================================================================
-    # ORDER PLACEMENT (with SDK or fallback)
+    # NEW: BALANCE FETCHING WITH CACHE (8 seconds)
     # ===================================================================
-    async def place_order(self, symbol: str, side: str, size: float, price: Optional[float] = None,
-                          tp_price=None, sl_price=None, order_type="LIMIT", reduce_only=False) -> Dict:
+    async def get_balance(self, force_refresh: bool = False) -> AccountBalance:
+        """Fetch latest Perpetual balance with caching + fallback"""
         await self._load_creds()
-        sym_info = SYMBOL_INFO.get(symbol, SYMBOL_INFO["BTC-USDT"])
         
+        if not force_refresh and self._balance_cache:
+            if time.time() - self._balance_cache.get('timestamp', 0) < 8:
+                return self._balance_cache['data']
+
+        # Primary: /account-balance endpoint
+        resp = await self._request("GET", "/api/v3/account-balance")
+        
+        equity = 0.0
+        available = 0.0
+        unrealized_pnl = 0.0
+
+        if not resp.get("error"):
+            data = resp.get("data") or resp
+            equity = float(
+                data.get("perpEquity") or 
+                data.get("perpTotalEquity") or 
+                data.get("totalEquity") or 
+                data.get("equity") or 0
+            )
+            available = float(data.get("available") or equity)
+            unrealized_pnl = float(data.get("unrealizedPnl") or 0)
+
+        # Fallback: /account endpoint
+        if equity <= 0:
+            resp = await self._request("GET", "/api/v3/account")
+            if not resp.get("error"):
+                data = resp.get("data") or resp
+                equity = float(
+                    data.get("perpEquity") or 
+                    data.get("totalEquity") or 
+                    data.get("equity") or 0
+                )
+                available = equity
+
+        balance = AccountBalance(
+            account_id=self.client_id,
+            total_equity=equity,
+            available=available,
+            unrealized_pnl=unrealized_pnl,
+            realized_pnl=0.0,
+            margin_used=0.0
+        )
+
+        # Cache it
+        self._balance_cache = {
+            'data': balance,
+            'timestamp': time.time()
+        }
+
+        await broker_state.update_balance(balance)
+        return balance
+
+    async def get_available_margin(self, symbol: str = None) -> float:
+        """Get usable margin for new orders"""
+        balance = await self.get_balance()
+        return balance.available
+
+    async def get_account_leverage(self) -> float:
+        """Fetch current leverage setting for the account"""
+        await self._load_creds()
+        resp = await self._request("GET", "/api/v3/account")
+        if not resp.get("error"):
+            data = resp.get("data") or resp
+            return float(data.get("leverage", 100))
+        return 100.0  # default
+
+    # ===================================================================
+    # NEW: SAFE POSITION SIZING CALCULATOR
+    # ===================================================================
+    async def calculate_safe_size(self, symbol: str, side: str, risk_percent: float = 10.0,
+                                   price: Optional[float] = None, leverage: Optional[float] = None) -> Dict:
+        """
+        Balance-aware position sizing with leverage validation.
+        Returns recommended size and safety info.
+        """
+        await self._load_creds()
+        
+        # 1. Get fresh balance
+        balance = await self.get_balance(force_refresh=True)
+        
+        if balance.total_equity <= 0:
+            raise HTTPException(400, "No available equity in Perpetual account")
+
+        current_leverage = leverage or (await self.get_account_leverage())
+        max_leverage = 100.0  # Apex default max for most pairs (adjust per symbol if needed)
+
+        if current_leverage > max_leverage:
+            current_leverage = max_leverage
+
+        # 2. Risk calculation
+        risk_amount = balance.available * (risk_percent / 100.0)
+        
+        # Get current price if not provided
+        if not price:
+            price = latest_prices.get(symbol)
+            if not price:
+                # Fallback: fetch from Apex ticker
+                ticker = await self._request("GET", f"/api/v3/ticker?symbol={symbol}")
+                if not ticker.get("error"):
+                    price = float(ticker.get("data", {}).get("last") or 0)
+        
+        if price <= 0:
+            raise ValueError("Unable to determine current price")
+
+        # 3. Base size from risk
+        base_size = risk_amount / price
+
+        # 4. Leverage-aware max size
+        max_size_by_leverage = (balance.total_equity * current_leverage) / price
+        
+        # Apply conservative safety buffer (90% of max)
+        safe_max_size = max_size_by_leverage * 0.90
+        
+        # Final recommended size
+        recommended_size = min(base_size, safe_max_size)
+        
+        # Round to symbol precision
+        sym_info = SYMBOL_INFO.get(symbol, SYMBOL_INFO["BTC-USDT"])
+        recommended_size = float(_amount_to_precision(recommended_size, sym_info["size_step"]))
+
+        # Safety checks
+        leverage_used = (recommended_size * price) / balance.total_equity if balance.total_equity > 0 else 0
+        
+        return {
+            "recommended_size": recommended_size,
+            "risk_amount_usd": float(risk_amount),
+            "max_size_by_leverage": float(max_size_by_leverage),
+            "current_equity": float(balance.total_equity),
+            "available_margin": float(balance.available),
+            "leverage_used": round(leverage_used, 2),
+            "current_leverage_setting": current_leverage,
+            "price_used": float(price),
+            "is_safe": leverage_used <= current_leverage * 0.95,
+            "warning": None if leverage_used <= current_leverage * 0.95 else "Approaching max leverage"
+        }
+
+    # ===================================================================
+    # ENHANCED ORDER PLACEMENT (auto-sizing if risk_percent given)
+    # ===================================================================
+    async def place_order(self, symbol: str, side: str, size: Optional[float] = None,
+                          price: Optional[float] = None, tp_price=None, sl_price=None,
+                          order_type="LIMIT", reduce_only=False,
+                          risk_percent: Optional[float] = None, leverage: Optional[float] = None) -> Dict:
+        
+        await self._load_creds()
+        
+        # === Balance-Aware Sizing ===
+        sizing = None
+        if risk_percent is not None or size is None:
+            try:
+                sizing = await self.calculate_safe_size(
+                    symbol=symbol,
+                    side=side,
+                    risk_percent=risk_percent or 10.0,
+                    price=price,
+                    leverage=leverage
+                )
+                
+                if sizing["warning"]:
+                    print(f"⚠️ Leverage warning for {symbol}: {sizing['warning']}")
+                
+                size = sizing["recommended_size"]
+                
+                if size <= 0:
+                    return {"success": False, "error": "Calculated size is zero. Check balance and risk settings."}
+            except Exception as e:
+                return {"success": False, "error": f"Sizing failed: {str(e)}"}
+
         # Precision
+        sym_info = SYMBOL_INFO.get(symbol, SYMBOL_INFO["BTC-USDT"])
         size_str = _amount_to_precision(size, sym_info["size_step"])
         price_str = _price_to_precision(price or 0, sym_info["price_step"])
         
@@ -843,7 +1015,7 @@ class ApexClient:
             "direction": side.upper(),
             "makerFeeRate": "0.0002",
             "takerFeeRate": "0.0005",
-            "expiration": expiry_sec // 3600,  # hours for L2
+            "expiration": expiry_sec // 3600,
             "reduceOnly": reduce_only
         }
 
@@ -898,11 +1070,16 @@ class ApexClient:
                 status="PLACED"
             )
             await broker_state.update_order(order_info)
-            return {"success": True, "order_id": result["data"].get("id")}
+            return {
+                "success": True,
+                "order_id": result["data"].get("id"),
+                "size_used": float(size_str),
+                "sizing_info": sizing
+            }
         return {"success": False, "error": result.get("msg") or str(result)}
 
     # ===================================================================
-    # BATCH ORDERS
+    # BATCH ORDERS (unchanged)
     # ===================================================================
     async def batch_orders(self, orders: List[Dict]) -> Dict:
         """Place multiple orders in one batch request"""
@@ -994,7 +1171,7 @@ class ApexClient:
         return {"success": False, "error": result.get("msg") or "Batch order failed"}
 
     # ===================================================================
-    # CANCEL ORDER (with ZK signature)
+    # CANCEL ORDER (with ZK signature) – unchanged
     # ===================================================================
     async def cancel_order(self, order_id: str = None, client_order_id: str = None) -> Dict:
         await self._load_creds()
@@ -1036,7 +1213,7 @@ class ApexClient:
         return {"success": False, "error": result.get("msg") or "Cancel failed"}
 
     # ===================================================================
-    # TRANSFER: Funding <-> Perpetual (with ZK signature)
+    # TRANSFER: Funding <-> Perpetual (with ZK signature) – unchanged
     # ===================================================================
     async def transfer_funding_to_perp(self, amount: str, asset: str = "USDT") -> Dict:
         await self._load_creds()
@@ -1089,7 +1266,7 @@ class ApexClient:
         return {"success": "data" in result, "result": result}
 
     # ===================================================================
-    # WITHDRAWAL (on-chain) with ZK signature
+    # WITHDRAWAL (on-chain) with ZK signature – unchanged
     # ===================================================================
     async def withdraw(self, amount: str, asset: str, address: str, chain_id: str = "1", withdraw_type: str = "FAST_WITHDRAWAL") -> Dict:
         await self._load_creds()
@@ -1127,7 +1304,7 @@ async def get_apex_client(client_id: str) -> ApexClient:
     return apex_clients[client_id]
 
 # =============================================================================
-# BACKGROUND SYNC TASK (Perpetual balance only)
+# BACKGROUND SYNC TASK (Perpetual balance only) – unchanged
 # =============================================================================
 async def broker_sync_loop():
     while True:
@@ -1224,7 +1401,7 @@ async def broker_sync_loop():
             await asyncio.sleep(5)
 
 # =============================================================================
-# DIRECT BALANCE FETCH FOR EA (Perpetual)
+# DIRECT BALANCE FETCH FOR EA (Perpetual) – unchanged
 # =============================================================================
 async def fetch_apex_balance(client_id: str) -> Optional[float]:
     try:
@@ -1446,96 +1623,81 @@ class PineScriptEngine:
         return rsi
 
 # =============================================================================
-# EA CONSUMER LOOP – with batch order support (collects multiple signals)
+# EA CONSUMER LOOP – now uses risk_percent for auto-sizing
 # =============================================================================
-# Simple accumulator: each client can have a list of pending signals
 pending_batch_signals: Dict[str, List[dict]] = {}
 
 async def ea_consumer_loop(client_id: str):
     client = get_client(client_id)
     if not client:
         return
-    # Batch window: collect signals for 2 seconds before placing batch
     BATCH_WINDOW = 2.0
     while client_id in active_ea_consumers:
         try:
             signal = get_active_signal_db(client_id)
             if signal:
-                # Add to pending batch
                 if client_id not in pending_batch_signals:
                     pending_batch_signals[client_id] = []
                 pending_batch_signals[client_id].append(signal)
-                # Wait a short time to collect more signals
                 await asyncio.sleep(BATCH_WINDOW)
-                # Process batch
                 batch = pending_batch_signals[client_id]
                 if not batch:
                     continue
-                # Clear pending list
                 pending_batch_signals[client_id] = []
                 
                 print(f"EA: processing batch of {len(batch)} signals for {client_id}")
                 
-                # Get Perpetual balance once
-                balances = await broker_state.get_balances()
-                balance_obj = next((b for b in balances if b.account_id == client_id), None)
-                real_equity = balance_obj.total_equity if balance_obj else None
-                if not real_equity or real_equity <= 0:
-                    real_equity = await fetch_apex_balance(client_id)
-                    if real_equity and real_equity > 0:
-                        await broker_state.update_balance(AccountBalance(
-                            account_id=client_id,
-                            total_equity=real_equity,
-                            available=real_equity,
-                            unrealized_pnl=0,
-                            realized_pnl=0,
-                            margin_used=0
-                        ))
-                    else:
-                        print(f"EA: Still no Perp balance for {client_id}, skipping batch")
-                        continue
-                
-                # Build batch orders
-                batch_orders = []
-                for sig in batch:
-                    # Calculate size per signal
-                    asset_percent = client.get("asset_percent", 10.0)
-                    # For batch, we split total risk equally among signals? Or each signal uses its own risk?
-                    # Here we use same risk per signal (could be improved)
-                    risk_amount = real_equity * (asset_percent / 100.0) / len(batch)  # spread risk
-                    size = risk_amount / sig["price"]
-                    size = round(size, 3)
-                    if size <= 0:
-                        continue
-                    tp_percent = client.get("tp", 2.0)
-                    sl_percent = client.get("sl", 1.0)
-                    if sig["action"].upper() == "BUY":
-                        tp_price = sig["price"] * (1 + tp_percent / 100.0)
-                        sl_price = sig["price"] * (1 - sl_percent / 100.0)
-                    else:
-                        tp_price = sig["price"] * (1 - tp_percent / 100.0)
-                        sl_price = sig["price"] * (1 + sl_percent / 100.0)
-                    batch_orders.append({
-                        "symbol": sig["symbol"],
-                        "side": sig["action"],
-                        "size": size,
-                        "price": sig["price"],
-                        "tp": tp_price,
-                        "sl": sl_price,
-                        "type": "LIMIT"
-                    })
-                
-                if not batch_orders:
-                    print(f"EA: No valid orders in batch")
+                # Get fresh balance
+                apex_client = await get_apex_client(client_id)
+                balance = await apex_client.get_balance(force_refresh=True)
+                real_equity = balance.total_equity
+                if real_equity <= 0:
+                    print(f"EA: No Perp balance for {client_id}, skipping batch")
                     continue
                 
-                # Place batch order
-                apex_client = await get_apex_client(client_id)
+                # Build batch orders with auto-sizing
+                batch_orders = []
+                asset_percent = client.get("asset_percent", 10.0)
+                for sig in batch:
+                    try:
+                        sizing = await apex_client.calculate_safe_size(
+                            symbol=sig["symbol"],
+                            side=sig["action"],
+                            risk_percent=asset_percent,
+                            price=sig["price"]
+                        )
+                        size = sizing["recommended_size"]
+                        if size <= 0:
+                            continue
+                        tp_percent = client.get("tp", 2.0)
+                        sl_percent = client.get("sl", 1.0)
+                        if sig["action"].upper() == "BUY":
+                            tp_price = sig["price"] * (1 + tp_percent / 100.0)
+                            sl_price = sig["price"] * (1 - sl_percent / 100.0)
+                        else:
+                            tp_price = sig["price"] * (1 - tp_percent / 100.0)
+                            sl_price = sig["price"] * (1 + sl_percent / 100.0)
+                        batch_orders.append({
+                            "symbol": sig["symbol"],
+                            "side": sig["action"],
+                            "size": size,
+                            "price": sig["price"],
+                            "tp": tp_price,
+                            "sl": sl_price,
+                            "type": "LIMIT"
+                        })
+                    except Exception as e:
+                        print(f"EA sizing error for {sig['symbol']}: {e}")
+                        continue
+                
+                if not batch_orders:
+                    continue
+                
+                # Place batch order(s)
                 if len(batch_orders) == 1:
-                    # Single order – use place_order
                     o = batch_orders[0]
                     result = await apex_client.place_order(
-                        o["symbol"], o["side"], o["size"], o["price"],
+                        o["symbol"], o["side"], size=o["size"], price=o["price"],
                         tp_price=o["tp"], sl_price=o["sl"]
                     )
                     for sig in batch:
@@ -1546,7 +1708,6 @@ async def ea_consumer_loop(client_id: str):
                                               "size": o["size"], "price": o["price"], "status": "PLACED",
                                               "order_id": result.get("order_id"), "pnl": 0})
                 else:
-                    # Multiple orders – batch
                     result = await apex_client.batch_orders(batch_orders)
                     if result.get("success"):
                         for i, sig in enumerate(batch):
@@ -1558,7 +1719,6 @@ async def ea_consumer_loop(client_id: str):
                     else:
                         for sig in batch:
                             log_signal(client_id, sig["action"], sig["strength"], False, source="ea_consumer_batch")
-                # After batch, sleep a bit
                 await asyncio.sleep(30)
             else:
                 await asyncio.sleep(5)
@@ -1587,11 +1747,12 @@ async def lifespan(app: FastAPI):
     ws_task = asyncio.create_task(okx_manager.start())
     sync_task = asyncio.create_task(broker_sync_loop())
     print("="*60)
-    print("🚀 SilverVeil Trading Terminal - FULL ZK INTEGRATION")
+    print("🚀 SilverVeil Trading Terminal - FULL ZK INTEGRATION + BALANCE-AWARE SIZING")
     print(f"📍 http://localhost:{PORT}")
     print("✅ OKX order book + chart data")
     print("✅ Apex ZK signed orders, transfers, withdrawals, batch orders")
     print("✅ EA uses real Perpetual balance + batch signals")
+    print("✅ Balance‑aware order sizing with leverage preview")
     print("="*60)
     yield
     okx_manager.stop()
@@ -1766,7 +1927,7 @@ async def edit_client(client_id: str, update: ClientUpdate):
         raise HTTPException(500, f"Update failed: {str(e)}")
 
 # ------------------------------------------------------------------------------
-# TRADE ENDPOINT (single order)
+# ENHANCED TRADE ENDPOINT (with risk_percent)
 # ------------------------------------------------------------------------------
 @app.post("/api/trade")
 async def trade(req: TradeRequest):
@@ -1774,16 +1935,51 @@ async def trade(req: TradeRequest):
         raise HTTPException(404, "Client not found")
     apex_client = await get_apex_client(req.client_id)
     result = await apex_client.place_order(
-        req.symbol, req.side, req.size, req.price,
-        tp_price=req.tp, sl_price=req.sl
+        symbol=req.symbol,
+        side=req.side,
+        size=req.size,
+        price=req.price,
+        tp_price=req.tp,
+        sl_price=req.sl,
+        risk_percent=req.risk_percent,
+        leverage=req.leverage
     )
-    log_trade(req.client_id, {"symbol": req.symbol, "side": req.side, "size": req.size, "price": req.price,
+    log_trade(req.client_id, {"symbol": req.symbol, "side": req.side, 
+                              "size": result.get("size_used", req.size), 
+                              "price": req.price,
                               "status": "PLACED" if result.get("success") else "FAILED",
                               "order_id": result.get("order_id")})
     return result
 
 # ------------------------------------------------------------------------------
-# BATCH ORDER ENDPOINT
+# NEW: CALCULATE SIZE PREVIEW ENDPOINT
+# ------------------------------------------------------------------------------
+@app.get("/api/calculate-size")
+async def calculate_size(
+    client_id: str,
+    symbol: str,
+    side: str,
+    risk_percent: float = 10.0,
+    price: Optional[float] = None,
+    leverage: Optional[float] = None
+):
+    if not get_client(client_id):
+        raise HTTPException(404, "Client not found")
+    apex_client = await get_apex_client(client_id)
+    try:
+        sizing = await apex_client.calculate_safe_size(
+            symbol=symbol,
+            side=side,
+            risk_percent=risk_percent,
+            price=price,
+            leverage=leverage
+        )
+        return {"success": True, **sizing}
+    except Exception as e:
+        raise HTTPException(400, str(e))
+
+# ------------------------------------------------------------------------------
+# BATCH ORDER ENDPOINT (unchanged)
 # ------------------------------------------------------------------------------
 @app.post("/api/order/batch")
 async def batch_order(req: BatchOrderRequest):
@@ -1795,7 +1991,7 @@ async def batch_order(req: BatchOrderRequest):
     return result
 
 # ------------------------------------------------------------------------------
-# TRANSFER ENDPOINTS (new)
+# TRANSFER ENDPOINTS (unchanged)
 # ------------------------------------------------------------------------------
 @app.post("/api/transfer/to_perp")
 async def transfer_to_perp(req: TransferRequest):
@@ -1817,7 +2013,6 @@ async def transfer_from_perp(req: TransferRequest):
     result = await apex_client.transfer_perp_to_funding(req.amount, req.asset)
     return result
 
-# Existing transfer endpoint (Perp->Funding) kept for compatibility
 @app.post("/api/transfer")
 async def transfer(req: WithdrawRequest):
     if not get_client(req.client_id):
@@ -1827,7 +2022,7 @@ async def transfer(req: WithdrawRequest):
     return {"success": True, "transfer_result": result}
 
 # ------------------------------------------------------------------------------
-# WITHDRAWAL ENDPOINTS (enhanced)
+# WITHDRAWAL ENDPOINTS (unchanged)
 # ------------------------------------------------------------------------------
 @app.post("/api/withdraw")
 async def withdraw(req: WithdrawRequest):
@@ -1865,7 +2060,7 @@ async def full_withdraw(req: WithdrawRequest):
     return {"success": True, "transfer_result": transfer_res, "withdraw_result": withdraw_res}
 
 # ------------------------------------------------------------------------------
-# CANCEL ORDER ENDPOINT
+# CANCEL ORDER ENDPOINT (unchanged)
 # ------------------------------------------------------------------------------
 @app.post("/api/order/cancel")
 async def cancel_order(client_id: str, order_id: str = None, client_order_id: str = None):
@@ -1876,7 +2071,7 @@ async def cancel_order(client_id: str, order_id: str = None, client_order_id: st
     return result
 
 # ------------------------------------------------------------------------------
-# EA AND PINESCRIPT MANAGEMENT ENDPOINTS (NEW)
+# EA AND PINESCRIPT MANAGEMENT ENDPOINTS (NEW in previous integration)
 # ------------------------------------------------------------------------------
 @app.post("/api/auto/start")
 async def start_auto_trading(settings: EASettings):
@@ -1897,14 +2092,12 @@ async def stop_auto_trading(client_id: str):
 async def upload_ea_file(client_id: str = Form(...), file: UploadFile = File(...)):
     if not get_client(client_id):
         raise HTTPException(404, "Client not found")
-    # Ensure client-specific directory
     client_ea_dir = os.path.join(EA_DIR, client_id)
     os.makedirs(client_ea_dir, exist_ok=True)
     file_path = os.path.join(client_ea_dir, file.filename)
     content = await file.read()
     with open(file_path, "wb") as f:
         f.write(content)
-    # Save to database
     conn = sqlite3.connect(DATABASE_PATH)
     c = conn.cursor()
     c.execute("INSERT INTO ea_files (id, client_id, name, file_path, uploaded_at) VALUES (?,?,?,?,?)",
@@ -1929,7 +2122,6 @@ async def save_pine_script(data: dict):
         raise HTTPException(400, "Missing client_id, name or code")
     if not get_client(client_id):
         raise HTTPException(404, "Client not found")
-    # Save without compiling (just store)
     script_id = save_pine_script_to_db(client_id, name, code)
     return {"success": True, "script_id": script_id}
 
@@ -2010,10 +2202,10 @@ async def run_backtest(symbol: str, strategy: str, start_date: str, end_date: st
 
 @app.get("/health")
 async def health():
-    return {"status": "online", "version": "36.0-full-zk-integration", "database": DATABASE_PATH, "zk_signing": "SDK+fallback"}
+    return {"status": "online", "version": "37.0-balance-aware", "database": DATABASE_PATH, "zk_signing": "SDK+fallback"}
 
 # ------------------------------------------------------------------------------
-# FRONTEND HTML (with new Transfer UI elements)
+# FRONTEND HTML – with sizing preview and risk-based trading UI
 # ------------------------------------------------------------------------------
 HTML = """
 <!DOCTYPE html>
@@ -2021,7 +2213,7 @@ HTML = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SilverVeil Trading Terminal (Full ZK Integration)</title>
+    <title>SilverVeil Trading Terminal (Balance‑Aware)</title>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <script src="https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.js"></script>
     <style>
@@ -2041,9 +2233,12 @@ HTML = """
         .center-panel { flex: 1; display: flex; flex-direction: column; background: #131722; min-width: 0; overflow: hidden; }
         .chart-toolbar { padding: 8px 16px; background: #1e222d; border-bottom: 1px solid #2a2e39; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
         #chartContainer { flex: 1; min-height: 0; }
-        .execution-panel { background: #1e222d; border-top: 1px solid #2a2e39; padding: 12px 16px; display: flex; gap: 16px; align-items: center; }
+        .execution-panel { background: #1e222d; border-top: 1px solid #2a2e39; padding: 12px 16px; display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
         .long-btn { background: #00bcd4; color: #fff; padding: 8px 24px; border-radius: 8px; border: none; cursor: pointer; font-weight: 700; }
         .short-btn { background: #ef5350; color: #fff; padding: 8px 24px; border-radius: 8px; border: none; cursor: pointer; font-weight: 700; }
+        .sizing-preview { background: #1e222d; padding: 8px 12px; border-radius: 8px; border: 1px solid #2a2e39; font-family: monospace; font-size: 0.85rem; min-width: 280px; }
+        .sizing-preview strong { color: #787b86; }
+        .sizing-preview .warning { color: #ff9800; font-size: 0.8rem; margin-top: 4px; display: none; }
         .right-panel { width: 320px; background: #131722; border-left: 1px solid #2a2e39; display: flex; flex-direction: column; overflow-y: auto; }
         .orderbook-header { padding: 12px; font-weight: 600; border-bottom: 1px solid #2a2e39; }
         .orderbook-row { display: flex; justify-content: space-between; padding: 6px 12px; font-size: 0.8rem; }
@@ -2067,7 +2262,7 @@ HTML = """
 <body>
 <div class="app">
     <div class="top-bar">
-        <div class="logo">⚡ SilverVeil (Full ZK Integration)</div>
+        <div class="logo">⚡ SilverVeil (Balance‑Aware Sizing)</div>
         <div>
             <select id="symbolSelect"></select>
             <select id="timeframeSelect"><option value="1m">1m</option><option value="5m">5m</option><option value="15m">15m</option><option value="1h" selected>1h</option><option value="4h">4h</option><option value="1d">1d</option></select>
@@ -2096,6 +2291,12 @@ HTML = """
                 <div class="execution-panel">
                     <button class="long-btn" id="longBtn">LONG</button>
                     <button class="short-btn" id="shortBtn">SHORT</button>
+                    <div id="sizingPreview" class="sizing-preview">
+                        <div><strong>Recommended Size:</strong> <span id="recSize">—</span></div>
+                        <div><strong>Risk Amount:</strong> <span id="riskAmount">$0.00</span></div>
+                        <div><strong>Leverage Used:</strong> <span id="levUsed">0.00x</span></div>
+                        <div id="sizingWarning" class="warning">⚠️ Approaching max leverage</div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -2228,6 +2429,7 @@ HTML = """
     let currentSymbol = 'BTC-USDT', currentTimeframe = '1h';
     let currentEditClientId = null;
 
+    // ---------- CHART ----------
     async function loadChart() {
         const res = await fetch(`/api/chart/data?symbol=${currentSymbol}&timeframe=${currentTimeframe}&limit=300`);
         if (!res.ok) {
@@ -2257,6 +2459,7 @@ HTML = """
         }
     }
 
+    // ---------- WEBSOCKETS ----------
     function connectOrderBookWebSocket() {
         if (ws && ws.readyState === WebSocket.OPEN) return;
         ws = new WebSocket(`ws://${window.location.host}/ws`);
@@ -2266,6 +2469,11 @@ HTML = """
                 const data = JSON.parse(e.data);
                 if(data.type === 'orderbook'){
                     document.getElementById('lastPriceDisplay').innerText = `$${data.last_price.toFixed(2)}`;
+                    // update sizing preview for current symbol if a client is selected (via preview)
+                    if (window._lastPreviewSide && window._lastPreviewClientId) {
+                        updateSizingPreview(window._lastPreviewSide, window._lastPreviewClientId, data.last_price);
+                    }
+                    // orderbook display
                     if (data.bids && data.bids.length > 0) {
                         let bidsHtml = '<div style="font-size:0.7rem;padding:4px 12px;color:#787b86;">Bids</div>';
                         data.bids.forEach(b => {
@@ -2312,6 +2520,7 @@ HTML = """
         };
     }
 
+    // ---------- BROKER STATE DISPLAY ----------
     async function refreshBrokerState() {
         try {
             const [ordersRes, positionsRes, balancesRes] = await Promise.all([
@@ -2327,64 +2536,119 @@ HTML = """
     }
 
     function updateBrokerDisplays(data) {
-        // Orders Table
         let ordersHtml = `<table><tr><th>ID</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Price</th><th>Status</th></tr>`;
         const orders = data.orders || [];
-        if (orders.length === 0) {
-            ordersHtml += `<tr><td colspan="6">No open orders</td></tr>`;
-        } else {
-            orders.slice(0, 10).forEach(o => {
-                ordersHtml += `<tr>
-                    <td>${o.order_id ? o.order_id.slice(0,8) : '-'}</td>
-                    <td>${o.symbol}</td>
-                    <td style="color:${o.side === 'BUY' ? '#00bcd4' : '#ef5350'}">${o.side}</td>
-                    <td>${o.quantity}</td>
-                    <td>${o.price ? parseFloat(o.price).toFixed(2) : '-'}</td>
-                    <td>${o.status}</td>
-                </tr>`;
+        if (orders.length === 0) ordersHtml += `<tr><td colspan="6">No open orders</td></tr>`;
+        else {
+            orders.slice(0,10).forEach(o => {
+                ordersHtml += `<tr><td>${o.order_id ? o.order_id.slice(0,8) : '-'}</td><td>${o.symbol}</td><td style="color:${o.side === 'BUY' ? '#00bcd4' : '#ef5350'}">${o.side}</td><td>${o.quantity}</td><td>${o.price ? parseFloat(o.price).toFixed(2) : '-'}</td><td>${o.status}</td></tr>`;
             });
         }
         ordersHtml += `</table>`;
         document.getElementById('brokerOrdersTable').innerHTML = ordersHtml;
 
-        // Positions Table
         let posHtml = `<table><tr><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>Unrealized PnL</th></tr>`;
         const positions = data.positions || [];
-        if (positions.length === 0) {
-            posHtml += `<tr><td colspan="5">No open positions</td></tr>`;
-        } else {
+        if (positions.length === 0) posHtml += `<tr><td colspan="5">No open positions</td></tr>`;
+        else {
             positions.forEach(p => {
-                posHtml += `<tr>
-                    <td>${p.symbol}</td>
-                    <td style="color:${p.side === 'LONG' ? '#00bcd4' : '#ef5350'}">${p.side}</td>
-                    <td>${p.quantity}</td>
-                    <td>${parseFloat(p.entry_price).toFixed(2)}</td>
-                    <td style="color:${p.unrealized_pnl >= 0 ? '#00bcd4' : '#ef5350'}">${parseFloat(p.unrealized_pnl).toFixed(2)}</td>
-                </tr>`;
+                posHtml += `<tr><td>${p.symbol}</td><td style="color:${p.side === 'LONG' ? '#00bcd4' : '#ef5350'}">${p.side}</td><td>${p.quantity}</td><td>${parseFloat(p.entry_price).toFixed(2)}</td><td style="color:${p.unrealized_pnl >= 0 ? '#00bcd4' : '#ef5350'}">${parseFloat(p.unrealized_pnl).toFixed(2)}</td></tr>`;
             });
         }
         posHtml += `</table>`;
         document.getElementById('brokerPositionsTable').innerHTML = posHtml;
 
-        // Balances Table
         let balHtml = `<table><tr><th>Account</th><th>Total Equity</th><th>Available</th><th>Unrealized PnL</th></tr>`;
         const balances = data.balances || [];
-        if (balances.length === 0) {
-            balHtml += `<tr><td colspan="4">No balance data yet</td></tr>`;
-        } else {
+        if (balances.length === 0) balHtml += `<tr><td colspan="4">No balance data yet</td></tr>`;
+        else {
             balances.forEach(b => {
-                balHtml += `<tr>
-                    <td>${b.account_id ? b.account_id.slice(0,8) : '-'}</td>
-                    <td>$${parseFloat(b.total_equity).toFixed(2)}</td>
-                    <td>$${parseFloat(b.available).toFixed(2)}</td>
-                    <td style="color:${b.unrealized_pnl >= 0 ? '#00bcd4' : '#ef5350'}">$${parseFloat(b.unrealized_pnl).toFixed(2)}</td>
-                </tr>`;
+                balHtml += `<tr><td>${b.account_id ? b.account_id.slice(0,8) : '-'}</td><td>$${parseFloat(b.total_equity).toFixed(2)}</td><td>$${parseFloat(b.available).toFixed(2)}</td><td style="color:${b.unrealized_pnl >= 0 ? '#00bcd4' : '#ef5350'}">$${parseFloat(b.unrealized_pnl).toFixed(2)}</td></tr>`;
             });
         }
         balHtml += `</table>`;
         document.getElementById('brokerBalancesTable').innerHTML = balHtml;
     }
 
+    // ---------- SIZING PREVIEW (NEW) ----------
+    let currentRiskPercent = 10.0;
+    let currentLeverage = null;  // use account default if null
+
+    async function updateSizingPreview(side, clientId, price = null) {
+        if (!clientId) return;
+        window._lastPreviewSide = side;
+        window._lastPreviewClientId = clientId;
+        const symbol = currentSymbol;
+        const currentPrice = price || parseFloat(document.getElementById('lastPriceDisplay').innerText.replace('$','')) || 0;
+        try {
+            let url = `/api/calculate-size?client_id=${clientId}&symbol=${symbol}&side=${side}&risk_percent=${currentRiskPercent}&price=${currentPrice}`;
+            if (currentLeverage) url += `&leverage=${currentLeverage}`;
+            const res = await fetch(url);
+            const data = await res.json();
+            if (data.success) {
+                document.getElementById('recSize').innerText = `${data.recommended_size} ${symbol.split('-')[0]}`;
+                document.getElementById('riskAmount').innerText = `$${parseFloat(data.risk_amount_usd).toFixed(2)}`;
+                document.getElementById('levUsed').innerText = `${data.leverage_used}x`;
+                document.getElementById('levUsed').style.color = data.leverage_used > 80 ? '#ef5350' : '#00bcd4';
+                const warningEl = document.getElementById('sizingWarning');
+                if (data.warning) {
+                    warningEl.innerText = data.warning;
+                    warningEl.style.display = 'block';
+                } else {
+                    warningEl.style.display = 'none';
+                }
+            } else {
+                console.warn("Sizing preview error", data);
+            }
+        } catch(e) {
+            console.error("Sizing preview failed", e);
+        }
+    }
+
+    // ---------- TRADE EXECUTION (risk‑based) ----------
+    async function executeTradeWithSizing(side) {
+        const clientId = prompt('Client ID:', '');
+        if (!clientId) return;
+
+        let riskPct = parseFloat(prompt('Risk % of balance (default 10):', currentRiskPercent));
+        if (isNaN(riskPct)) riskPct = 10.0;
+        currentRiskPercent = riskPct;
+
+        const levInput = prompt('Override leverage (leave empty for account default):', '');
+        let lev = null;
+        if (levInput && !isNaN(parseFloat(levInput))) lev = parseFloat(levInput);
+        currentLeverage = lev;
+
+        const price = parseFloat(document.getElementById('lastPriceDisplay').innerText.replace('$','')) || 0;
+
+        try {
+            const res = await fetch('/api/trade', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    client_id: clientId,
+                    symbol: currentSymbol,
+                    side: side,
+                    risk_percent: riskPct,
+                    leverage: lev,
+                    price: price,
+                    tp: null,
+                    sl: null
+                })
+            });
+            const result = await res.json();
+            if (result.success) {
+                alert(`✅ ${side} order placed!\nSize: ${result.size_used}\nEquity: $${result.sizing_info?.current_equity?.toFixed(2) || '?'}`);
+                refreshBrokerState();
+            } else {
+                alert(`❌ Order failed: ${result.error}`);
+            }
+        } catch(err) {
+            alert('Execution error: ' + err.message);
+        }
+    }
+
+    // ---------- UI HELPERS ----------
     function updateSymbol(symbol) { currentSymbol = symbol; loadChart(); }
     function populateSymbolSelects() {
         const symbols = ['BTC-USDT','ETH-USDT','SOL-USDT'];
@@ -2405,6 +2669,7 @@ HTML = """
     document.getElementById('refreshChartBtn').onclick = loadChart;
     document.getElementById('refreshBrokerBtn').onclick = refreshBrokerState;
 
+    // ---------- CLIENTS MANAGEMENT (unchanged) ----------
     async function loadClients() {
         const res = await fetch('/api/clients');
         const data = await res.json();
@@ -2437,10 +2702,8 @@ HTML = """
         document.getElementById('editWallets').value = JSON.stringify(creds.withdrawal_wallets || [], null, 2);
         document.getElementById('editModal').style.display = 'flex';
     };
-
     function hideEditModal() { document.getElementById('editModal').style.display = 'none'; }
     function hideAddClientModal() { document.getElementById('addClientModal').style.display = 'none'; }
-
     document.getElementById('saveEditBtn')?.addEventListener('click', async () => {
         if(!currentEditClientId) return;
         let wallets = [];
@@ -2462,24 +2725,12 @@ HTML = """
         try {
             const res = await fetch(`/api/clients/${currentEditClientId}`, { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(data) });
             const result = await res.json();
-            if(res.ok) {
-                alert('Client updated');
-                hideEditModal();
-                loadClients();
-            } else {
-                alert('Update failed: ' + (result.detail || result.message || 'Unknown error'));
-            }
-        } catch(err) {
-            alert('Network error: ' + err.message);
-        }
+            if(res.ok) { alert('Client updated'); hideEditModal(); loadClients(); }
+            else alert('Update failed: ' + (result.detail || result.message || 'Unknown error'));
+        } catch(err) { alert('Network error: ' + err.message); }
     });
-
     document.getElementById('cancelEditBtn')?.addEventListener('click', hideEditModal);
-
-    document.getElementById('addClientBtn')?.addEventListener('click', () => {
-        document.getElementById('addClientModal').style.display = 'flex';
-    });
-
+    document.getElementById('addClientBtn')?.addEventListener('click', () => { document.getElementById('addClientModal').style.display = 'flex'; });
     document.getElementById('confirmAddClientBtn')?.addEventListener('click', async () => {
         let wallets = [];
         try { wallets = JSON.parse(document.getElementById('addWallets').value); if(!Array.isArray(wallets)) wallets = []; } catch(e) { wallets = []; }
@@ -2501,20 +2752,13 @@ HTML = """
         try {
             const res = await fetch('/api/clients', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(data) });
             const result = await res.json();
-            if(res.ok) {
-                alert('Client created');
-                hideAddClientModal();
-                loadClients();
-            } else {
-                alert('Creation failed: ' + (result.detail || result.message || 'Unknown error'));
-            }
-        } catch(err) {
-            alert('Network error: ' + err.message);
-        }
+            if(res.ok) { alert('Client created'); hideAddClientModal(); loadClients(); }
+            else alert('Creation failed: ' + (result.detail || result.message || 'Unknown error'));
+        } catch(err) { alert('Network error: ' + err.message); }
     });
-
     document.getElementById('cancelAddClientBtn')?.addEventListener('click', hideAddClientModal);
 
+    // ---------- EA / PINE (unchanged) ----------
     document.getElementById('startEABtn').onclick = async () => {
         const clientId = document.getElementById('eaClientId').value;
         if(!clientId) return alert('Client ID required');
@@ -2523,13 +2767,11 @@ HTML = """
         const res = await fetch('/api/auto/start', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({client_id:clientId, symbol, broker}) });
         const data = await res.json(); alert(data.message);
     };
-
     document.getElementById('stopEABtn').onclick = async () => {
         const clientId = document.getElementById('eaClientId').value;
         if(!clientId) return alert('Client ID required');
         const res = await fetch(`/api/auto/stop/${clientId}`, { method:'POST' }); const data = await res.json(); alert(data.message);
     };
-
     document.getElementById('uploadEABtn').onclick = async () => {
         const clientId = document.getElementById('eaClientId').value, file = document.getElementById('eaFile').files[0];
         if(!clientId || !file) return alert('Client ID and file required');
@@ -2537,7 +2779,6 @@ HTML = """
         const res = await fetch('/api/ea/upload', { method:'POST', body:fd });
         const data = await res.json(); document.getElementById('eaStatus').innerHTML = data.success ? `✅ EA uploaded: ${data.filename}` : `❌ Upload failed: ${data.detail || 'Unknown'}`;
     };
-
     async function loadSavedScripts() {
         const cid = document.getElementById('pineClientId').value;
         if(!cid) return;
@@ -2548,19 +2789,16 @@ HTML = """
         html+='</ul>';
         document.getElementById('savedScriptsList').innerHTML = html;
     }
-
     window.loadScript = async (id) => {
         const res = await fetch(`/api/pine/script/${id}`); const data = await res.json();
         document.getElementById('pineCode').value = data.script.code; document.getElementById('pineScriptName').value = data.script.name;
     };
-
     document.getElementById('savePineBtn').onclick = async () => {
         const cid = document.getElementById('pineClientId').value, name = document.getElementById('pineScriptName').value, code = document.getElementById('pineCode').value;
         if(!cid||!name) return alert('Client ID and name required');
         const res = await fetch('/api/pine/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({client_id:cid,name,code})});
         const data = await res.json(); alert(data.success?'Saved':'Error'); loadSavedScripts();
     };
-
     document.getElementById('compilePineBtn').onclick = async () => {
         const cid = document.getElementById('pineClientId').value, name = document.getElementById('pineScriptName').value, code = document.getElementById('pineCode').value, symbol = document.getElementById('pineSymbol').value;
         if(!cid||!name) return alert('Client ID and name required');
@@ -2570,7 +2808,6 @@ HTML = """
             const data = await res.json(); alert(`Compiled: ${data.signals.length} signals generated. Signal activated for 24h.`); loadSavedScripts();
         } catch(error) { alert('Network error: ' + error.message); }
     };
-
     async function loadWallets() {
         const clientId = document.getElementById('withdrawClientId').value;
         if(!clientId) return;
@@ -2580,7 +2817,6 @@ HTML = """
         let html = wallets.map((w,i) => `<div class="wallet-item">${i}: ${w.substring(0,20)}...</div>`).join('');
         document.getElementById('walletList').innerHTML = html || 'No wallets stored';
     }
-
     document.getElementById('withdrawClientId').addEventListener('input', loadWallets);
     document.getElementById('withdrawBtn').onclick = async () => {
         const clientId = document.getElementById('withdrawClientId').value, amount = document.getElementById('withdrawAmount').value, walletIndex = parseInt(document.getElementById('walletIndex').value);
@@ -2589,7 +2825,6 @@ HTML = """
         const res = await fetch('/api/withdraw', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({client_id:clientId, amount, asset, wallet_index:walletIndex}) });
         const data = await res.json(); document.getElementById('withdrawResult').innerHTML = `<pre>${JSON.stringify(data, null, 2)}</pre>`;
     };
-
     document.getElementById('fullWithdrawBtn').onclick = async () => {
         const clientId = document.getElementById('withdrawClientId').value, amount = document.getElementById('withdrawAmount').value, walletIndex = parseInt(document.getElementById('walletIndex').value);
         const asset = document.getElementById('withdrawAsset').value;
@@ -2597,33 +2832,24 @@ HTML = """
         const res = await fetch('/api/withdraw/full', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({client_id:clientId, amount, asset, wallet_index:walletIndex}) });
         const data = await res.json(); document.getElementById('withdrawResult').innerHTML = `<pre>${JSON.stringify(data, null, 2)}</pre>`;
     };
-
-    // Transfer functions
     document.getElementById('transferToPerpBtn').onclick = async () => {
-        const clientId = document.getElementById('transferClientId').value;
-        const amount = document.getElementById('transferAmount').value;
+        const clientId = document.getElementById('transferClientId').value, amount = document.getElementById('transferAmount').value;
         if(!clientId || !amount) return alert('Client ID and amount required');
         const res = await fetch('/api/transfer/to_perp', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({client_id:clientId, amount, asset:"USDT", from_wallet:"FUNDING", to_wallet:"PERPETUAL"}) });
-        const data = await res.json();
-        document.getElementById('transferResult').innerHTML = `<pre>${JSON.stringify(data, null, 2)}</pre>`;
+        const data = await res.json(); document.getElementById('transferResult').innerHTML = `<pre>${JSON.stringify(data, null, 2)}</pre>`;
     };
     document.getElementById('transferFromPerpBtn').onclick = async () => {
-        const clientId = document.getElementById('transferClientId').value;
-        const amount = document.getElementById('transferAmount').value;
+        const clientId = document.getElementById('transferClientId').value, amount = document.getElementById('transferAmount').value;
         if(!clientId || !amount) return alert('Client ID and amount required');
         const res = await fetch('/api/transfer/from_perp', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({client_id:clientId, amount, asset:"USDT", from_wallet:"PERPETUAL", to_wallet:"FUNDING"}) });
-        const data = await res.json();
-        document.getElementById('transferResult').innerHTML = `<pre>${JSON.stringify(data, null, 2)}</pre>`;
+        const data = await res.json(); document.getElementById('transferResult').innerHTML = `<pre>${JSON.stringify(data, null, 2)}</pre>`;
     };
     document.getElementById('batchOrderBtn').onclick = async () => {
         const clientId = document.getElementById('transferClientId').value;
         let orders;
-        try {
-            orders = JSON.parse(document.getElementById('batchOrdersJson').value);
-        } catch(e) { alert('Invalid JSON'); return; }
+        try { orders = JSON.parse(document.getElementById('batchOrdersJson').value); } catch(e) { alert('Invalid JSON'); return; }
         const res = await fetch('/api/order/batch', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({client_id:clientId, orders}) });
-        const data = await res.json();
-        document.getElementById('batchResult').innerHTML = `<pre>${JSON.stringify(data, null, 2)}</pre>`;
+        const data = await res.json(); document.getElementById('batchResult').innerHTML = `<pre>${JSON.stringify(data, null, 2)}</pre>`;
     };
     document.getElementById('cancelOrderBtn').onclick = async () => {
         const clientId = document.getElementById('transferClientId').value;
@@ -2634,31 +2860,28 @@ HTML = """
         if(orderId) url += `&order_id=${orderId}`;
         if(clientOrderId) url += `&client_order_id=${clientOrderId}`;
         const res = await fetch(url, { method:'POST' });
-        const data = await res.json();
-        document.getElementById('cancelResult').innerHTML = `<pre>${JSON.stringify(data, null, 2)}</pre>`;
+        const data = await res.json(); document.getElementById('cancelResult').innerHTML = `<pre>${JSON.stringify(data, null, 2)}</pre>`;
     };
-
-    async function executeTrade(side) {
-        const clientId = prompt('Client ID:'); if(!clientId) return;
-        const size = parseFloat(prompt('Size (BTC):','0.001'));
-        const price = parseFloat(document.getElementById('lastPriceDisplay').innerText.replace('$',''));
-        const tpPct = prompt('Take Profit % (optional, leave blank for none):', '2');
-        const slPct = prompt('Stop Loss % (optional, leave blank for none):', '1');
-        let tp = null, sl = null;
-        if(tpPct && !isNaN(parseFloat(tpPct))) {
-            tp = side === 'BUY' ? price * (1 + parseFloat(tpPct)/100) : price * (1 - parseFloat(tpPct)/100);
+    // ---------- NEW TRADE BUTTONS ----------
+    document.getElementById('longBtn').onclick = () => {
+        const clientId = prompt('Client ID for preview:', '');
+        if (clientId) {
+            updateSizingPreview('BUY', clientId);
+            setTimeout(() => executeTradeWithSizing('BUY'), 500);
+        } else {
+            alert('Client ID required');
         }
-        if(slPct && !isNaN(parseFloat(slPct))) {
-            sl = side === 'BUY' ? price * (1 - parseFloat(slPct)/100) : price * (1 + parseFloat(slPct)/100);
+    };
+    document.getElementById('shortBtn').onclick = () => {
+        const clientId = prompt('Client ID for preview:', '');
+        if (clientId) {
+            updateSizingPreview('SELL', clientId);
+            setTimeout(() => executeTradeWithSizing('SELL'), 500);
+        } else {
+            alert('Client ID required');
         }
-        const res = await fetch('/api/trade',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({client_id:clientId,symbol:currentSymbol,side,size,price,tp,sl,dry_run:false})});
-        const result = await res.json(); alert(result.success?`Order placed: ${result.order_id}`:`Error: ${result.error}`);
-        refreshBrokerState();
-    }
-
-    document.getElementById('longBtn').onclick=()=>executeTrade('BUY');
-    document.getElementById('shortBtn').onclick=()=>executeTrade('SELL');
-
+    };
+    // ---------- INIT ----------
     document.querySelectorAll('.nav-item').forEach(item=>{
         item.addEventListener('click',()=>{
             const panel=item.dataset.panel;
@@ -2671,7 +2894,6 @@ HTML = """
             if(panel==='withdraw') loadWallets();
         });
     });
-
     populateSymbolSelects(); loadChart(); connectOrderBookWebSocket(); connectTradingWebSocket(); loadClients();
     setInterval(refreshBrokerState, 5000);
 </script>
