@@ -8,7 +8,7 @@ RUN apt-get update && apt-get install -y gcc g++ && rm -rf /var/lib/apt/lists/*
 # Copy requirements first for better layer caching
 COPY requirements.txt .
 
-# Install core dependencies + all required packages for all three services
+# Install core dependencies + both SDKs (apexpro + apexomni)
 RUN pip install --no-cache-dir -r requirements.txt && \
     pip install --no-cache-dir \
         ecdsa \
@@ -17,8 +17,7 @@ RUN pip install --no-cache-dir -r requirements.txt && \
         eth-account \
         python-multipart \
         apexpro \
-        apexomni \
-        supervisor
+        apexomni
 
 # Test imports (do not break the build)
 RUN python -c "from apexpro import zklink_sdk; print('✅ apexpro SDK ready')" 2>&1 || \
@@ -26,20 +25,14 @@ RUN python -c "from apexpro import zklink_sdk; print('✅ apexpro SDK ready')" 2
 RUN python -c "from apexomni import HttpPrivateSign; print('✅ apexomni SDK ready')" 2>&1 || \
     echo "⚠️ apexomni SDK not available – falling back to pure Python ZK signing"
 
-# Copy all application source files
-COPY signer_service.py silverveil_backend.py supervisord.conf ./
+# Copy only the required application files
+COPY signer_service.py silverveil_trading.py ./
 
-# Environment variables (kept from original)
+# Environment variables (adjust as needed)
 ENV PORT=8099
 ENV SIGNER_SECRET=vertbacon-prod-signer-2026
-ENV RUN_MODE=supervisor
-
-# Possible RUN_MODE values: trading, backend, signer, supervisor
-# Supervisor runs both signer_service and silverveil_trading
 
 EXPOSE 8099
 
-# Entrypoint script to choose which service(s) to run
-COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
-ENTRYPOINT ["/entrypoint.sh"]
+# Run the unified trading terminal (includes signer logic)
+CMD ["python", "silverveil_trading.py"]
