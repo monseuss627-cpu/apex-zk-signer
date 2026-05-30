@@ -12,10 +12,23 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 from pathlib import Path
+
+# ====================== COMPATIBILITY FIX ======================
+# Fix for apexomni (and other old libs) using removed inspect.getargspec
+import inspect
+
+if not hasattr(inspect, "getargspec"):
+    print("⚠️  Applying inspect.getargspec compatibility shim for Python 3.11+")
+    inspect.getargspec = inspect.getfullargspec
+
+if not hasattr(inspect, "formatargspec"):
+    def _formatargspec(*args, **kwargs):
+        return inspect.formatannotation(*args, **kwargs) if hasattr(inspect, 'formatannotation') else str(args)
+    inspect.formatargspec = _formatargspec
+# ============================================================
 
 # ========== Embedded C++ Source ==========
 CPP_SOURCE = '''#include <iostream>
@@ -156,19 +169,35 @@ HTML_FRONTEND = '''<!DOCTYPE html>
             ws.onopen = () => { document.getElementById("status").innerText = "Connected"; document.getElementById("status").classList.remove("text-yellow-400"); document.getElementById("status").classList.add("text-green-400"); };
             ws.onmessage = (event) => {
                 const data = JSON.parse(event.data);
-                if (data.type === "price_update") { document.getElementById("newPrice").value = data.price; if(running) triggerCalculation(); }
+                if (data.type === "price_update") { 
+                    document.getElementById("newPrice").value = data.price; 
+                    document.getElementById("currentPrice").innerText = parseFloat(data.price).toFixed(2);
+                    if(running) triggerCalculation(); 
+                }
                 else if (data.type === "calc_result") {
-                    document.getElementById("stepResult").innerText = data.step_result; document.getElementById("finalOutput").innerText = data.final_output;
-                    document.getElementById("priceDiff").innerText = data.price_diff; document.getElementById("timestamp").innerText = data.timestamp;
-                    const logDiv = document.getElementById("logList"); const entry = document.createElement("div");
-                    entry.className = "border-b border-gray-700 pb-1"; entry.innerHTML = `<span class="text-gray-400">${data.timestamp}</span> ${data.symbol} | Δ: ${data.price_diff} | Out: ${data.final_output}`;
-                    logDiv.prepend(entry); if(logDiv.children.length > 50) logDiv.removeChild(logDiv.lastChild);
+                    document.getElementById("stepResult").innerText = parseFloat(data.step_result).toFixed(6);
+                    document.getElementById("finalOutput").innerText = parseFloat(data.final_output).toFixed(2);
+                    document.getElementById("priceDiff").innerText = parseFloat(data.price_diff).toFixed(4);
+                    document.getElementById("timestamp").innerText = data.timestamp;
+                    const logDiv = document.getElementById("logList"); 
+                    const entry = document.createElement("div");
+                    entry.className = "border-b border-gray-700 pb-1"; 
+                    entry.innerHTML = `<span class="text-gray-400">${data.timestamp}</span> ${data.symbol} | Δ: ${parseFloat(data.price_diff).toFixed(4)} | Out: ${parseFloat(data.final_output).toFixed(2)}`;
+                    logDiv.prepend(entry); 
+                    if(logDiv.children.length > 50) logDiv.removeChild(logDiv.lastChild);
                 }
             };
             ws.onclose = () => { document.getElementById("status").innerText = "Disconnected"; document.getElementById("status").classList.remove("text-green-400"); document.getElementById("status").classList.add("text-yellow-400"); setTimeout(connectWebSocket, 3000); };
         }
         function triggerCalculation() {
-            const payload = { symbol: document.getElementById("sym").value, old_price: parseFloat(document.getElementById("oldPrice").value), new_price: parseFloat(document.getElementById("newPrice").value), increment: parseFloat(document.getElementById("increment").value), leverage: parseFloat(document.getElementById("leverage").value), percent: parseFloat(document.getElementById("percent").value) };
+            const payload = { 
+                symbol: document.getElementById("sym").value, 
+                old_price: parseFloat(document.getElementById("oldPrice").value), 
+                new_price: parseFloat(document.getElementById("newPrice").value), 
+                increment: parseFloat(document.getElementById("increment").value), 
+                leverage: parseFloat(document.getElementById("leverage").value), 
+                percent: parseFloat(document.getElementById("percent").value) 
+            };
             if(ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({type:"calc_request", data:payload}));
         }
         document.getElementById("startBtn").onclick = () => { running = true; if(ws) ws.send(JSON.stringify({type:"start_bot"})); };
@@ -185,23 +214,19 @@ def compile_cpp():
     cpp_path = Path("signal_core.cpp")
     exe_path = Path("signal_core")
     if exe_path.exists() and cpp_path.exists():
-        # already compiled
         return str(exe_path)
-    # Write source
+    
     cpp_path.write_text(CPP_SOURCE)
-    # Compile
     print("Compiling C++ core (requires g++)...")
     result = subprocess.run(["g++", "-std=c++17", "-O2", str(cpp_path), "-o", str(exe_path)], capture_output=True, text=True)
     if result.returncode != 0:
         print("Compilation failed:", result.stderr)
         sys.exit(1)
-    print("Compilation successful.")
+    print("✅ C++ core compiled successfully.")
     return str(exe_path)
 
 # ========== FastAPI + ApeX Omni ==========
-# These imports are inside the main guard to avoid slow startup if just compiling
 async def main():
-    # Delayed imports so the script can compile first without needing all deps
     from fastapi import FastAPI, WebSocket, WebSocketDisconnect
     from fastapi.responses import HTMLResponse
     import uvicorn
@@ -212,14 +237,15 @@ async def main():
     SECRET = os.getenv("APEX_SECRET", "")
     PASSPHRASE = os.getenv("APEX_PASSPHRASE", "")
     ZK_SEEDS = os.getenv("APEX_ZK_SEEDS", "")
+
     if not all([API_KEY, SECRET, PASSPHRASE, ZK_SEEDS]):
-        print("WARNING: ApeX credentials not set. Bot will use mock price data.")
+        print("⚠️  ApeX credentials not set. Running in MOCK mode.")
         client = None
     else:
         client = Client(
             api_key_credentials={'key': API_KEY, 'secret': SECRET, 'passphrase': PASSPHRASE},
             zk_seeds=ZK_SEEDS,
-            network_id=1  # mainnet, change for testnet
+            network_id=1
         )
 
     SYMBOL = "BTC-USDT"
@@ -228,11 +254,9 @@ async def main():
     bot_running = False
     last_price = None
 
-    # C++ subprocess
     exe_path = compile_cpp()
     cpp_proc = subprocess.Popen([exe_path], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
 
-    # WebSocket manager
     class Manager:
         def __init__(self):
             self.active = set()
@@ -247,9 +271,9 @@ async def main():
                     await ws.send_text(msg)
                 except:
                     pass
+
     manager = Manager()
 
-    # Read C++ output and broadcast
     def read_cpp_output():
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -257,14 +281,14 @@ async def main():
             line = cpp_proc.stdout.readline()
             if not line:
                 break
-            asyncio.run_coroutine_threadsafe(manager.broadcast(line), loop)
+            asyncio.run_coroutine_threadsafe(manager.broadcast(line.strip()), loop)
+
     threading.Thread(target=read_cpp_output, daemon=True).start()
 
     async def fetch_price():
         if client is None:
-            # Mock price for demo (random walk)
             import random
-            return 60000 + random.uniform(-100, 100)
+            return 60000 + random.uniform(-150, 150)
         try:
             ticker = client.get_ticker(SYMBOL)
             return float(ticker['price'])
@@ -285,7 +309,7 @@ async def main():
                             "symbol": SYMBOL,
                             "old_price": last_price,
                             "new_price": price,
-                            "increment": 100.0,   # default, frontend can override via manual trigger
+                            "increment": 100.0,
                             "leverage": 10.0,
                             "percent": 5.0
                         }
@@ -325,17 +349,12 @@ async def main():
         except WebSocketDisconnect:
             manager.disconnect(websocket)
 
-    @app.on_event("shutdown")
-    def shutdown():
-        cpp_proc.terminate()
-
-    # Start background price monitor
     asyncio.create_task(price_monitor())
 
-    # Run server
     config = uvicorn.Config(app, host="0.0.0.0", port=8000, log_level="info")
     server = uvicorn.Server(config)
     await server.serve()
 
 if __name__ == "__main__":
+    print("🚀 Starting Trading Signal Processor...")
     asyncio.run(main())
