@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
 Single-file Trading Signal Processor
-- Auto C++ compilation with detailed diagnostics
+- Pure Python math engine (no C++ required)
 - Public price feed (ApeX + Binance)
+- No compilation needed
 """
 
 import asyncio
@@ -13,96 +14,41 @@ import sys
 import threading
 import time
 from pathlib import Path
+from decimal import Decimal, getcontext
 
-# ====================== COMPATIBILITY FIX ======================
-import inspect
-if not hasattr(inspect, "getargspec"):
-    print("⚠️  Applying inspect.getargspec compatibility shim...")
-    inspect.getargspec = inspect.getfullargspec
+getcontext().prec = 50  # High precision
 
-if not hasattr(inspect, "formatargspec"):
-    def _formatargspec(*args, **kwargs):
-        return inspect.formatannotation(*args, **kwargs) if hasattr(inspect, 'formatannotation') else str(args)
-    inspect.formatargspec = _formatargspec
-# ============================================================
+# ========== Pure Python Math Engine ==========
+def calculate_signal(signal_data):
+    try:
+        symbol = signal_data["symbol"]
+        old_price = Decimal(str(signal_data["old_price"]))
+        new_price = Decimal(str(signal_data["new_price"]))
+        increment = Decimal(str(signal_data["increment"]))
+        leverage = Decimal(str(signal_data["leverage"]))
+        percent = Decimal(str(signal_data["percent"]))
 
-# ========== Embedded C++ Source ==========
-CPP_SOURCE = '''#include <iostream>
-#include <string>
-#include <cmath>
-#include <iomanip>
-#include <chrono>
-#include <ctime>
-#include <sstream>
+        price_diff = new_price - old_price
+        if abs(price_diff) < Decimal('1e-15'):
+            price_diff = Decimal('1e-15')
 
-using fp_t = long double;
+        step_result = increment * leverage * (percent / Decimal(100))
+        intermediate = step_result / price_diff
+        final_output = (intermediate / Decimal(1000)) * Decimal('1e6')
 
-struct Signal {
-    std::string symbol;
-    fp_t old_price;
-    fp_t new_price;
-    fp_t increment;
-    fp_t leverage;
-    fp_t percent;
-    std::string timestamp;
-};
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
 
-fp_t calculateOutput(const Signal& s) {
-    fp_t price_diff = s.new_price - s.old_price;
-    if (std::abs(price_diff) < 1e-15L) price_diff = 1e-15L;
-    fp_t step1 = s.increment * s.leverage;
-    fp_t step2 = step1 * (s.percent / 100.0L);
-    fp_t intermediate = step2 / price_diff;
-    fp_t final = (intermediate / 1000.0L) * 1e6L;
-    return final;
-}
-
-int main() {
-    std::string line;
-    while (std::getline(std::cin, line)) {
-        if (line.empty()) continue;
-        Signal sig;
-        auto extract = [&](const std::string& key) -> std::string {
-            size_t pos = line.find("\\"" + key + "\\"");
-            if (pos == std::string::npos) return "";
-            pos = line.find(":", pos);
-            if (pos == std::string::npos) return "";
-            pos++;
-            while (pos < line.size() && (line[pos] == ' ' || line[pos] == '\\t')) pos++;
-            if (line[pos] == '\\"') {
-                size_t end = line.find("\\"", pos+1);
-                return line.substr(pos+1, end-pos-1);
-            } else {
-                size_t end = pos;
-                while (end < line.size() && (std::isdigit(line[end]) || line[end]=='.' || line[end]=='-' || line[end]=='e' || line[end]=='E')) end++;
-                return line.substr(pos, end-pos);
-            }
-        };
-        sig.symbol = extract("symbol");
-        sig.old_price = std::stold(extract("old_price"));
-        sig.new_price = std::stold(extract("new_price"));
-        sig.increment = std::stold(extract("increment"));
-        sig.leverage = std::stold(extract("leverage"));
-        sig.percent = std::stold(extract("percent"));
-        auto now = std::chrono::system_clock::now();
-        std::time_t t = std::chrono::system_clock::to_time_t(now);
-        char ts[64];
-        std::strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", std::localtime(&t));
-        sig.timestamp = ts;
-        fp_t price_diff = sig.new_price - sig.old_price;
-        fp_t step_result = sig.increment * sig.leverage * (sig.percent / 100.0L);
-        fp_t final_output = calculateOutput(sig);
-        std::cout << "{\\"type\\":\\"calc_result\\",\\"timestamp\\":\\"" << sig.timestamp
-                  << "\\",\\"symbol\\":\\"" << sig.symbol
-                  << "\\",\\"price_diff\\":" << std::setprecision(15) << price_diff
-                  << ",\\"step_result\\":" << step_result
-                  << ",\\"final_output\\":" << final_output
-                  << "}" << std::endl;
-        std::cout.flush();
-    }
-    return 0;
-}
-'''
+        return {
+            "type": "calc_result",
+            "timestamp": timestamp,
+            "symbol": symbol,
+            "price_diff": float(price_diff),
+            "step_result": float(step_result),
+            "final_output": float(final_output)
+        }
+    except Exception as e:
+        print(f"Calc error: {e}")
+        return None
 
 # ========== HTML Frontend (unchanged) ==========
 HTML_FRONTEND = '''<!DOCTYPE html>
@@ -201,41 +147,7 @@ HTML_FRONTEND = '''<!DOCTYPE html>
 </html>
 '''
 
-def compile_cpp():
-    cpp_path = Path("signal_core.cpp")
-    exe_path = Path("signal_core")
-
-    if not cpp_path.exists():
-        print("📝 Creating C++ source...")
-        cpp_path.write_text(CPP_SOURCE)
-
-    if exe_path.exists():
-        print("✅ Using existing C++ executable")
-        return str(exe_path)
-
-    print("🔨 Compiling C++ core...")
-    try:
-        result = subprocess.run(
-            ["g++", "-std=c++17", "-O2", "-o", str(exe_path), str(cpp_path)],
-            capture_output=True,
-            text=True
-        )
-        if result.returncode == 0:
-            print("✅ Compilation successful")
-            return str(exe_path)
-        else:
-            print("❌ Compilation failed:")
-            print(result.stderr)
-            print("\n💡 Make sure g++ is installed:")
-            print("   sudo apt install g++    # Ubuntu / Debian / WSL")
-            print("   brew install gcc        # macOS")
-            sys.exit(1)
-    except FileNotFoundError:
-        print("❌ g++ compiler not found!")
-        print("Please install g++ and try again.")
-        sys.exit(1)
-
-# ========== Main ==========
+# ========== FastAPI + Public Feed ==========
 async def main():
     from fastapi import FastAPI, WebSocket, WebSocketDisconnect
     from fastapi.responses import HTMLResponse
@@ -243,25 +155,24 @@ async def main():
     from apexomni.http_public import HttpPublic
     from apexomni.constants import APEX_OMNI_HTTP_MAIN
 
-    print("🚀 Starting Trading Signal Processor...")
+    print("🚀 Starting Trading Signal Processor (Python mode)...")
 
-    exe_path = compile_cpp()
+    SYMBOL = "BTC-USDT"
+    RATE_LIMIT_SEC = 1.0
+    last_signal_time = 0
+    bot_running = False
+    last_price = None
 
-    cpp_proc = subprocess.Popen(
-        [exe_path], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE, text=True, bufsize=1
-    )
-
-    # ... (rest of the code remains the same as previous version)
-
-    # Public client
     try:
         apex_public = HttpPublic(APEX_OMNI_HTTP_MAIN)
+        print("✅ ApeX public feed connected")
     except:
         apex_public = None
+        print("⚠️ Using Binance fallback")
 
     class Manager:
-        def __init__(self): self.active = set()
+        def __init__(self):
+            self.active = set()
         async def connect(self, ws):
             await ws.accept()
             self.active.add(ws)
@@ -269,38 +180,53 @@ async def main():
             self.active.discard(ws)
         async def broadcast(self, msg):
             for ws in list(self.active):
-                try: await ws.send_text(msg)
-                except: pass
+                try:
+                    await ws.send_text(msg)
+                except:
+                    pass
 
     manager = Manager()
 
-    def read_cpp_output():
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        while True:
-            line = cpp_proc.stdout.readline()
-            if not line: break
-            asyncio.run_coroutine_threadsafe(manager.broadcast(line.strip()), loop)
-
-    threading.Thread(target=read_cpp_output, daemon=True).start()
-
-    # fetch_price, price_monitor, FastAPI setup (same as last version)
     async def fetch_price():
         if apex_public:
             try:
-                ticker = apex_public.ticker_v3(symbol="BTC-USDT")
-                p = float(ticker.get('price') or ticker.get('lastPrice') or 0)
-                if p > 0: return p
-            except: pass
+                ticker = apex_public.ticker_v3(symbol=SYMBOL)
+                price = float(ticker.get('price') or ticker.get('lastPrice') or 0)
+                if price > 0:
+                    return price
+            except:
+                pass
         try:
             import requests
             r = requests.get("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT", timeout=5)
             return float(r.json()["price"])
         except:
             import random
-            return 60000 + random.uniform(-500, 500)
+            return 60000 + random.uniform(-400, 400)
 
-    # price_monitor, app routes, etc. (kept same for brevity)
+    async def price_monitor():
+        nonlocal last_signal_time, bot_running, last_price
+        while True:
+            if bot_running:
+                price = await fetch_price()
+                if price:
+                    await manager.broadcast(json.dumps({"type": "price_update", "price": price}))
+                    now = time.time()
+                    if (now - last_signal_time >= RATE_LIMIT_SEC and last_price and abs(price - last_price) > 1e-6):
+                        signal = {
+                            "symbol": SYMBOL,
+                            "old_price": last_price,
+                            "new_price": price,
+                            "increment": 100.0,
+                            "leverage": 10.0,
+                            "percent": 5.0
+                        }
+                        result = calculate_signal(signal)
+                        if result:
+                            await manager.broadcast(json.dumps(result))
+                        last_signal_time = now
+                    last_price = price
+            await asyncio.sleep(1.2)
 
     app = FastAPI()
 
@@ -316,15 +242,24 @@ async def main():
                 data = await websocket.receive_text()
                 msg = json.loads(data)
                 if msg["type"] == "start_bot":
-                    # ... same logic
-                    pass
-                # ... other handlers
+                    nonlocal bot_running, last_price
+                    bot_running = True
+                    price = await fetch_price()
+                    if price:
+                        last_price = price
+                        await manager.broadcast(json.dumps({"type": "price_update", "price": price}))
+                elif msg["type"] == "stop_bot":
+                    bot_running = False
+                elif msg["type"] == "calc_request":
+                    result = calculate_signal(msg["data"])
+                    if result:
+                        await manager.broadcast(json.dumps(result))
         except WebSocketDisconnect:
             manager.disconnect(websocket)
 
-    # Create tasks and run server
-    asyncio.create_task(price_monitor())   # define price_monitor as before
+    asyncio.create_task(price_monitor())
 
+    print("🌐 Server running at http://0.0.0.0:8000")
     config = uvicorn.Config(app, host="0.0.0.0", port=8000, log_level="info")
     server = uvicorn.Server(config)
     await server.serve()
