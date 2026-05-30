@@ -1,56 +1,50 @@
 #!/usr/bin/env python3
 """
-Single-file Trading Signal Processor
-- Pure Python math engine (no C++ required)
-- Public price feed (ApeX + Binance)
-- No compilation needed
+Single-file Trading Signal Processor for Render.com
+- Pure Python (no C++ compilation)
+- Public price feed only
+- Minimal dependencies
 """
 
 import asyncio
 import json
 import os
-import subprocess
 import sys
-import threading
 import time
-from pathlib import Path
 from decimal import Decimal, getcontext
+from pathlib import Path
 
-getcontext().prec = 50  # High precision
+getcontext().prec = 50
 
-# ========== Pure Python Math Engine ==========
-def calculate_signal(signal_data):
+# ========== Pure Python Calculation ==========
+def calculate_signal(data):
     try:
-        symbol = signal_data["symbol"]
-        old_price = Decimal(str(signal_data["old_price"]))
-        new_price = Decimal(str(signal_data["new_price"]))
-        increment = Decimal(str(signal_data["increment"]))
-        leverage = Decimal(str(signal_data["leverage"]))
-        percent = Decimal(str(signal_data["percent"]))
+        old = Decimal(str(data["old_price"]))
+        new = Decimal(str(data["new_price"]))
+        inc = Decimal(str(data["increment"]))
+        lev = Decimal(str(data["leverage"]))
+        pct = Decimal(str(data["percent"]))
 
-        price_diff = new_price - old_price
-        if abs(price_diff) < Decimal('1e-15'):
-            price_diff = Decimal('1e-15')
+        diff = new - old
+        if abs(diff) < Decimal("1e-15"):
+            diff = Decimal("1e-15")
 
-        step_result = increment * leverage * (percent / Decimal(100))
-        intermediate = step_result / price_diff
-        final_output = (intermediate / Decimal(1000)) * Decimal('1e6')
-
-        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        step = inc * lev * (pct / Decimal(100))
+        final = (step / diff / Decimal(1000)) * Decimal("1000000")
 
         return {
             "type": "calc_result",
-            "timestamp": timestamp,
-            "symbol": symbol,
-            "price_diff": float(price_diff),
-            "step_result": float(step_result),
-            "final_output": float(final_output)
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "symbol": data["symbol"],
+            "price_diff": float(diff),
+            "step_result": float(step),
+            "final_output": float(final)
         }
     except Exception as e:
-        print(f"Calc error: {e}")
+        print(f"Calculation error: {e}")
         return None
 
-# ========== HTML Frontend (unchanged) ==========
+# ========== HTML Frontend ==========
 HTML_FRONTEND = '''<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -58,7 +52,10 @@ HTML_FRONTEND = '''<!DOCTYPE html>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Trading Signal Processor</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <style>body { background: #0f172a; } .signal-log { max-height: 400px; overflow-y: auto; }</style>
+    <style>
+        body { background: #0f172a; }
+        .signal-log { max-height: 400px; overflow-y: auto; }
+    </style>
 </head>
 <body class="text-gray-200">
     <div class="container mx-auto p-4">
@@ -73,102 +70,107 @@ HTML_FRONTEND = '''<!DOCTYPE html>
             <div class="lg:col-span-2 bg-gray-800 rounded-lg p-6">
                 <h2 class="text-xl font-bold mb-4">📊 Signal Parameters</h2>
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <div><label class="block text-gray-400 text-sm">Symbol Pair</label><input type="text" id="sym" value="BTC-USDT" class="w-full bg-gray-700 rounded p-2"></div>
-                    <div><label class="block text-gray-400 text-sm">Old Price</label><input type="number" id="oldPrice" step="any" class="w-full bg-gray-700 rounded p-2" value="60000.0"></div>
-                    <div><label class="block text-gray-400 text-sm">New Price</label><input type="number" id="newPrice" step="any" readonly class="w-full bg-gray-700 rounded p-2 bg-gray-900"></div>
-                    <div><label class="block text-gray-400 text-sm">Increment</label><input type="number" id="increment" step="any" class="w-full bg-gray-700 rounded p-2" value="100.0"></div>
-                    <div><label class="block text-gray-400 text-sm">Leverage</label><input type="number" id="leverage" step="any" class="w-full bg-gray-700 rounded p-2" value="10.0"></div>
-                    <div><label class="block text-gray-400 text-sm">Percent (%)</label><input type="number" id="percent" step="any" class="w-full bg-gray-700 rounded p-2" value="5.0"></div>
+                    <div><label class="block text-gray-400 text-sm">Symbol</label><input type="text" id="sym" value="BTC-USDT" class="w-full bg-gray-700 rounded p-2"></div>
+                    <div><label class="block text-gray-400 text-sm">Old Price</label><input type="number" id="oldPrice" step="any" value="60000.0" class="w-full bg-gray-700 rounded p-2"></div>
+                    <div><label class="block text-gray-400 text-sm">New Price</label><input type="number" id="newPrice" readonly class="w-full bg-gray-900 rounded p-2"></div>
+                    <div><label class="block text-gray-400 text-sm">Increment</label><input type="number" id="increment" value="100.0" step="any" class="w-full bg-gray-700 rounded p-2"></div>
+                    <div><label class="block text-gray-400 text-sm">Leverage</label><input type="number" id="leverage" value="10.0" step="any" class="w-full bg-gray-700 rounded p-2"></div>
+                    <div><label class="block text-gray-400 text-sm">Percent (%)</label><input type="number" id="percent" value="5.0" step="any" class="w-full bg-gray-700 rounded p-2"></div>
                 </div>
                 <div class="mt-6 border-t border-gray-700 pt-4">
-                    <h3 class="text-lg font-semibold mb-2">📈 Calculated Results</h3>
-                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <h3 class="text-lg font-semibold mb-2">Results</h3>
+                    <div class="grid grid-cols-2 gap-4">
                         <div><label class="text-gray-400">Step Result</label><div id="stepResult" class="text-2xl font-mono text-green-400">--</div></div>
                         <div><label class="text-gray-400">Final Output</label><div id="finalOutput" class="text-2xl font-mono text-blue-400">--</div></div>
                         <div><label class="text-gray-400">Price Δ</label><div id="priceDiff" class="text-xl font-mono">--</div></div>
-                        <div><label class="text-gray-400">Timestamp</label><div id="timestamp" class="text-sm font-mono">--</div></div>
+                        <div><label class="text-gray-400">Time</label><div id="timestamp" class="text-sm font-mono">--</div></div>
                     </div>
                 </div>
             </div>
             <div class="bg-gray-800 rounded-lg p-4">
-                <h2 class="text-xl font-bold mb-2">📜 Signal Log</h2>
+                <h2 class="text-xl font-bold mb-2">Signal Log</h2>
                 <div id="logList" class="signal-log space-y-2 text-sm"><div class="text-gray-500">Waiting for signals...</div></div>
             </div>
         </div>
         <div class="mt-4 flex space-x-3">
-            <button id="startBtn" class="bg-green-600 hover:bg-green-700 px-4 py-2 rounded">▶ Start Bot</button>
-            <button id="stopBtn" class="bg-red-600 hover:bg-red-700 px-4 py-2 rounded">⏹ Stop Bot</button>
-            <button id="manualTrigger" class="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded">🔁 Manual Trigger</button>
+            <button id="startBtn" class="bg-green-600 hover:bg-green-700 px-6 py-2 rounded">Start Bot</button>
+            <button id="stopBtn" class="bg-red-600 hover:bg-red-700 px-6 py-2 rounded">Stop Bot</button>
+            <button id="manualTrigger" class="bg-blue-600 hover:bg-blue-700 px-6 py-2 rounded">Manual Trigger</button>
         </div>
     </div>
+
     <script>
         let ws = null, running = false;
-        function connectWebSocket() {
-            ws = new WebSocket("ws://localhost:8000/ws");
-            ws.onopen = () => { document.getElementById("status").innerText = "Connected"; document.getElementById("status").classList.add("text-green-400"); };
-            ws.onmessage = (event) => {
-                const data = JSON.parse(event.data);
-                if (data.type === "price_update") { 
-                    document.getElementById("newPrice").value = data.price; 
-                    document.getElementById("currentPrice").innerText = parseFloat(data.price).toFixed(2);
-                    if(running) triggerCalculation(); 
-                } else if (data.type === "calc_result") {
-                    document.getElementById("stepResult").innerText = parseFloat(data.step_result).toFixed(6);
-                    document.getElementById("finalOutput").innerText = parseFloat(data.final_output).toFixed(2);
-                    document.getElementById("priceDiff").innerText = parseFloat(data.price_diff).toFixed(4);
-                    document.getElementById("timestamp").innerText = data.timestamp;
-                    const logDiv = document.getElementById("logList"); 
+        function connect() {
+            ws = new WebSocket("ws://" + window.location.host + "/ws");
+            ws.onopen = () => document.getElementById("status").innerText = "Connected ✅";
+            ws.onmessage = (e) => {
+                const d = JSON.parse(e.data);
+                if (d.type === "price_update") {
+                    document.getElementById("newPrice").value = d.price;
+                    document.getElementById("currentPrice").innerText = parseFloat(d.price).toFixed(2);
+                    if (running) trigger();
+                } else if (d.type === "calc_result") {
+                    document.getElementById("stepResult").innerText = parseFloat(d.step_result).toFixed(6);
+                    document.getElementById("finalOutput").innerText = parseFloat(d.final_output).toFixed(2);
+                    document.getElementById("priceDiff").innerText = parseFloat(d.price_diff).toFixed(4);
+                    document.getElementById("timestamp").innerText = d.timestamp;
+
+                    const log = document.getElementById("logList");
                     const entry = document.createElement("div");
-                    entry.className = "border-b border-gray-700 pb-1"; 
-                    entry.innerHTML = `<span class="text-gray-400">${data.timestamp}</span> ${data.symbol} | Δ: ${parseFloat(data.price_diff).toFixed(4)} | Out: ${parseFloat(data.final_output).toFixed(2)}`;
-                    logDiv.prepend(entry); 
-                    if(logDiv.children.length > 50) logDiv.removeChild(logDiv.lastChild);
+                    entry.className = "border-b border-gray-700 pb-1";
+                    entry.innerHTML = `<span class="text-gray-400">${d.timestamp}</span> \( {d.symbol} | Δ: \){parseFloat(d.price_diff).toFixed(4)} | Out:${parseFloat(d.final_output).toFixed(2)}`;
+                    log.prepend(entry);
+                    if (log.children.length > 50) log.removeChild(log.lastChild);
                 }
             };
-            ws.onclose = () => { document.getElementById("status").innerText = "Disconnected"; setTimeout(connectWebSocket, 3000); };
+            ws.onclose = () => { document.getElementById("status").innerText = "Disconnected"; setTimeout(connect, 3000); };
         }
-        function triggerCalculation() {
-            const payload = { 
-                symbol: document.getElementById("sym").value, 
-                old_price: parseFloat(document.getElementById("oldPrice").value), 
-                new_price: parseFloat(document.getElementById("newPrice").value), 
-                increment: parseFloat(document.getElementById("increment").value), 
-                leverage: parseFloat(document.getElementById("leverage").value), 
-                percent: parseFloat(document.getElementById("percent").value) 
+        function trigger() {
+            const payload = {
+                symbol: document.getElementById("sym").value,
+                old_price: parseFloat(document.getElementById("oldPrice").value),
+                new_price: parseFloat(document.getElementById("newPrice").value),
+                increment: parseFloat(document.getElementById("increment").value),
+                leverage: parseFloat(document.getElementById("leverage").value),
+                percent: parseFloat(document.getElementById("percent").value)
             };
-            if(ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({type:"calc_request", data:payload}));
+            if (ws) ws.send(JSON.stringify({type: "calc_request", data: payload}));
         }
-        document.getElementById("startBtn").onclick = () => { running = true; if(ws) ws.send(JSON.stringify({type:"start_bot"})); };
-        document.getElementById("stopBtn").onclick = () => { running = false; if(ws) ws.send(JSON.stringify({type:"stop_bot"})); };
-        document.getElementById("manualTrigger").onclick = triggerCalculation;
-        connectWebSocket();
+        document.getElementById("startBtn").onclick = () => { running = true; ws.send(JSON.stringify({type:"start_bot"})); };
+        document.getElementById("stopBtn").onclick = () => { running = false; ws.send(JSON.stringify({type:"stop_bot"})); };
+        document.getElementById("manualTrigger").onclick = trigger;
+        connect();
     </script>
 </body>
 </html>
 '''
 
-# ========== FastAPI + Public Feed ==========
 async def main():
-    from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-    from fastapi.responses import HTMLResponse
-    import uvicorn
-    from apexomni.http_public import HttpPublic
-    from apexomni.constants import APEX_OMNI_HTTP_MAIN
+    try:
+        from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+        from fastapi.responses import HTMLResponse
+        import uvicorn
+    except ImportError as e:
+        print("Missing dependencies:", e)
+        print("Run: pip install fastapi uvicorn")
+        sys.exit(1)
 
-    print("🚀 Starting Trading Signal Processor (Python mode)...")
+    # Optional: apexomni
+    try:
+        from apexomni.http_public import HttpPublic
+        from apexomni.constants import APEX_OMNI_HTTP_MAIN
+        apex_public = HttpPublic(APEX_OMNI_HTTP_MAIN)
+        print("✅ ApeX public connected")
+    except:
+        apex_public = None
+        print("⚠️ Using Binance fallback only")
 
     SYMBOL = "BTC-USDT"
     RATE_LIMIT_SEC = 1.0
-    last_signal_time = 0
+    last_signal_time = 0.0
     bot_running = False
     last_price = None
-
-    try:
-        apex_public = HttpPublic(APEX_OMNI_HTTP_MAIN)
-        print("✅ ApeX public feed connected")
-    except:
-        apex_public = None
-        print("⚠️ Using Binance fallback")
 
     class Manager:
         def __init__(self):
@@ -179,9 +181,9 @@ async def main():
         def disconnect(self, ws):
             self.active.discard(ws)
         async def broadcast(self, msg):
-            for ws in list(self.active):
+            for w in list(self.active):
                 try:
-                    await ws.send_text(msg)
+                    await w.send_text(msg)
                 except:
                     pass
 
@@ -190,10 +192,9 @@ async def main():
     async def fetch_price():
         if apex_public:
             try:
-                ticker = apex_public.ticker_v3(symbol=SYMBOL)
-                price = float(ticker.get('price') or ticker.get('lastPrice') or 0)
-                if price > 0:
-                    return price
+                t = apex_public.ticker_v3(symbol=SYMBOL)
+                p = float(t.get('price') or t.get('lastPrice') or 0)
+                if p > 0: return p
             except:
                 pass
         try:
@@ -202,7 +203,7 @@ async def main():
             return float(r.json()["price"])
         except:
             import random
-            return 60000 + random.uniform(-400, 400)
+            return 60000 + random.uniform(-500, 500)
 
     async def price_monitor():
         nonlocal last_signal_time, bot_running, last_price
@@ -226,28 +227,28 @@ async def main():
                             await manager.broadcast(json.dumps(result))
                         last_signal_time = now
                     last_price = price
-            await asyncio.sleep(1.2)
+            await asyncio.sleep(1.5)
 
     app = FastAPI()
 
     @app.get("/")
-    async def get_index():
+    async def root():
         return HTMLResponse(HTML_FRONTEND)
 
     @app.websocket("/ws")
-    async def websocket_endpoint(websocket: WebSocket):
-        await manager.connect(websocket)
+    async def ws_endpoint(ws: WebSocket):
+        await manager.connect(ws)
         try:
             while True:
-                data = await websocket.receive_text()
+                data = await ws.receive_text()
                 msg = json.loads(data)
                 if msg["type"] == "start_bot":
                     nonlocal bot_running, last_price
                     bot_running = True
-                    price = await fetch_price()
-                    if price:
-                        last_price = price
-                        await manager.broadcast(json.dumps({"type": "price_update", "price": price}))
+                    p = await fetch_price()
+                    if p:
+                        last_price = p
+                        await manager.broadcast(json.dumps({"type": "price_update", "price": p}))
                 elif msg["type"] == "stop_bot":
                     bot_running = False
                 elif msg["type"] == "calc_request":
@@ -255,11 +256,11 @@ async def main():
                     if result:
                         await manager.broadcast(json.dumps(result))
         except WebSocketDisconnect:
-            manager.disconnect(websocket)
+            manager.disconnect(ws)
 
     asyncio.create_task(price_monitor())
 
-    print("🌐 Server running at http://0.0.0.0:8000")
+    print("🚀 Starting on Render → http://0.0.0.0:8000")
     config = uvicorn.Config(app, host="0.0.0.0", port=8000, log_level="info")
     server = uvicorn.Server(config)
     await server.serve()
