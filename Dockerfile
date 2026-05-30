@@ -35,4 +35,4 @@ ENV SIGNER_SECRET=vertbacon-prod-signer-2026
 EXPOSE 8099
 
 # Run the unified trading terminal (includes signer logic)
-CMD ["python", "silverveil_trading.py"]
+CMD ["python", "silverveil_nutraider.py"]
