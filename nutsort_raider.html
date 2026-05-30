@@ -24,7 +24,6 @@
       grid-template-columns: repeat(4, 1fr);
       gap: 10px;
     }
-    .scale-105 { transition: transform 0.15s ease; }
   </style>
 </head>
 <body class="bg-gradient-to-br from-slate-100 to-gray-200 min-h-screen flex items-center justify-center p-4 font-sans">
@@ -51,7 +50,7 @@
         <div class="bg-gray-50 border border-gray-200 rounded-2xl p-5 mb-6">
           <div class="text-right">
             <span class="text-xs uppercase tracking-widest text-gray-400">Result</span>
-            <div id="calcDisplay" class="display-bar text-5xl font-bold text-gray-800 min-h-[60px]">0</div>
+            <div id="calcDisplay" class="display-bar text-5xl font-bold text-gray-800 min-h-[60px] break-all">0</div>
           </div>
         </div>
 
@@ -85,7 +84,7 @@
           <button data-value="3" class="calc-btn bg-gray-100 hover:bg-gray-200 text-3xl py-5 rounded-2xl font-semibold">3</button>
           <button data-value="-" class="calc-btn bg-amber-100 hover:bg-amber-200 text-3xl py-5 rounded-2xl font-bold text-amber-700">-</button>
 
-          <button data-value="0" class="calc-btn bg-gray-100 hover:bg-gray-200 text-3xl py-5 rounded-2xl font-semibold col-span-1">0</button>
+          <button data-value="0" class="calc-btn bg-gray-100 hover:bg-gray-200 text-3xl py-5 rounded-2xl font-semibold col-span-2">0</button>
           <button data-value="." class="calc-btn bg-gray-100 hover:bg-gray-200 text-3xl py-5 rounded-2xl font-semibold">.</button>
           <button id="equalBtn" class="calc-btn bg-emerald-600 hover:bg-emerald-700 text-white text-3xl py-5 rounded-2xl font-bold">=</button>
           <button data-value="+" class="calc-btn bg-amber-100 hover:bg-amber-200 text-3xl py-5 rounded-2xl font-bold text-amber-700">+</button>
@@ -136,12 +135,13 @@
   </div>
 
   <script>
-    // === CALCULATOR ===
     let currentExpression = "0";
     const display = document.getElementById("calcDisplay");
 
     function updateDisplay() {
-      display.textContent = currentExpression.length > 18 ? currentExpression.slice(0,18) + "…" : currentExpression;
+      let text = currentExpression;
+      if (text.length > 18) text = text.slice(0, 18) + "…";
+      display.textContent = text || "0";
     }
 
     function handleButton(val) {
@@ -149,13 +149,16 @@
         currentExpression = "0";
       } else if (val === "=") {
         try {
-          currentExpression = String(eval(currentExpression));
+          let result = eval(currentExpression.replace('^', '**')); // Support ^ as power if wanted
+          currentExpression = String(result);
         } catch (e) {
           currentExpression = "Error";
-          setTimeout(() => { currentExpression = "0"; updateDisplay(); }, 1200);
+          setTimeout(() => { currentExpression = "0"; updateDisplay(); }, 1500);
         }
       } else {
         if (currentExpression === "0" && "0123456789".includes(val)) {
+          currentExpression = val;
+        } else if (currentExpression === "Error") {
           currentExpression = val;
         } else {
           currentExpression += val;
@@ -164,13 +167,14 @@
       updateDisplay();
     }
 
+    // Button listeners
     document.querySelectorAll("[data-value]").forEach(btn => {
       btn.addEventListener("click", () => handleButton(btn.dataset.value));
     });
     document.getElementById("equalBtn").addEventListener("click", () => handleButton("="));
     document.getElementById("clearDisplayBtn").addEventListener("click", () => handleButton("C"));
 
-    // === TRADING LOGIC ===
+    // Trading Logic
     function computeResults() {
       const percent = parseFloat(document.getElementById("percentInput").value) || 0;
       const newP = parseFloat(document.getElementById("newPriceInput").value) || 0;
@@ -187,10 +191,8 @@
     function printProductToDisplay() {
       const percent = parseFloat(document.getElementById("percentInput").value) || 0;
       const newP = parseFloat(document.getElementById("newPriceInput").value) || 0;
-      currentExpression = String(percent * newP);
+      currentExpression = String((percent * newP).toFixed(4));
       updateDisplay();
-      display.classList.add("scale-105");
-      setTimeout(() => display.classList.remove("scale-105"), 180);
     }
 
     // Event listeners
@@ -200,18 +202,17 @@
 
     document.getElementById("printProductBtn").addEventListener("click", printProductToDisplay);
 
-    // Keyboard
+    // Keyboard support
     document.addEventListener("keydown", e => {
-      if ("0123456789.+-*/".indexOf(e.key) > -1) handleButton(e.key);
-      if (e.key === "Enter") handleButton("=");
-      if (e.key === "Escape") handleButton("C");
+      if ("0123456789.+-*/".includes(e.key)) handleButton(e.key);
+      if (e.key === "Enter" || e.key === "=") handleButton("=");
+      if (e.key === "Escape" || e.key === "Backspace" && e.ctrlKey) handleButton("C");
       if (e.key.toLowerCase() === "p") printProductToDisplay();
     });
 
     // Initialize
     updateDisplay();
     computeResults();
-    console.log("%cNutsort Raider Ready", "color: #6366f1; font-weight: bold");
   </script>
 </body>
 </html>
