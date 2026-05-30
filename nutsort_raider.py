@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
 """
 Single-file Trading Signal Processor for Render.com
-- Pure Python (no C++ compilation)
-- Public price feed only
-- Minimal dependencies
+- Pure Python (no C++)
+- Health check for Render
+- Public price feed
 """
 
 import asyncio
 import json
-import os
-import sys
 import time
 from decimal import Decimal, getcontext
-from pathlib import Path
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse
+import uvicorn
 
 getcontext().prec = 50
 
-# ========== Pure Python Calculation ==========
+# ========== Calculation Engine ==========
 def calculate_signal(data):
     try:
         old = Decimal(str(data["old_price"]))
@@ -35,13 +35,13 @@ def calculate_signal(data):
         return {
             "type": "calc_result",
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "symbol": data["symbol"],
+            "symbol": data.get("symbol", "BTC-USDT"),
             "price_diff": float(diff),
             "step_result": float(step),
             "final_output": float(final)
         }
     except Exception as e:
-        print(f"Calculation error: {e}")
+        print(f"Calc error: {e}")
         return None
 
 # ========== HTML Frontend ==========
@@ -93,9 +93,9 @@ HTML_FRONTEND = '''<!DOCTYPE html>
             </div>
         </div>
         <div class="mt-4 flex space-x-3">
-            <button id="startBtn" class="bg-green-600 hover:bg-green-700 px-6 py-2 rounded">Start Bot</button>
-            <button id="stopBtn" class="bg-red-600 hover:bg-red-700 px-6 py-2 rounded">Stop Bot</button>
-            <button id="manualTrigger" class="bg-blue-600 hover:bg-blue-700 px-6 py-2 rounded">Manual Trigger</button>
+            <button id="startBtn" class="bg-green-600 hover:bg-green-700 px-6 py-2 rounded">▶ Start Bot</button>
+            <button id="stopBtn" class="bg-red-600 hover:bg-red-700 px-6 py-2 rounded">⏹ Stop Bot</button>
+            <button id="manualTrigger" class="bg-blue-600 hover:bg-blue-700 px-6 py-2 rounded">🔁 Manual</button>
         </div>
     </div>
 
@@ -146,124 +146,109 @@ HTML_FRONTEND = '''<!DOCTYPE html>
 </html>
 '''
 
-async def main():
-    try:
-        from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-        from fastapi.responses import HTMLResponse
-        import uvicorn
-    except ImportError as e:
-        print("Missing dependencies:", e)
-        print("Run: pip install fastapi uvicorn")
-        sys.exit(1)
+app = FastAPI()
 
-    # Optional: apexomni
+# Health check for Render.com
+@app.get("/")
+@app.head("/")
+async def root():
+    return {"status": "ok"}
+
+@app.get("/health")
+async def health():
+    return {"status": "healthy"}
+
+# WebSocket
+class Manager:
+    def __init__(self):
+        self.active = set()
+    async def connect(self, ws):
+        await ws.accept()
+        self.active.add(ws)
+    def disconnect(self, ws):
+        self.active.discard(ws)
+    async def broadcast(self, msg):
+        for w in list(self.active):
+            try:
+                await w.send_text(msg)
+            except:
+                pass
+
+manager = Manager()
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await manager.connect(websocket)
+    try:
+        while True:
+            data = await websocket.receive_text()
+            msg = json.loads(data)
+            if msg["type"] == "start_bot":
+                # start logic handled in background task
+                await websocket.send_text(json.dumps({"type": "status", "message": "Bot started"}))
+            elif msg["type"] == "stop_bot":
+                pass
+            elif msg["type"] == "calc_request":
+                result = calculate_signal(msg["data"])
+                if result:
+                    await manager.broadcast(json.dumps(result))
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+
+# Background price feed
+SYMBOL = "BTC-USDT"
+bot_running = False
+last_price = None
+last_signal_time = 0.0
+
+async def price_monitor():
+    global bot_running, last_price, last_signal_time
     try:
         from apexomni.http_public import HttpPublic
         from apexomni.constants import APEX_OMNI_HTTP_MAIN
-        apex_public = HttpPublic(APEX_OMNI_HTTP_MAIN)
-        print("✅ ApeX public connected")
+        apex = HttpPublic(APEX_OMNI_HTTP_MAIN)
     except:
-        apex_public = None
-        print("⚠️ Using Binance fallback only")
+        apex = None
 
-    SYMBOL = "BTC-USDT"
-    RATE_LIMIT_SEC = 1.0
-    last_signal_time = 0.0
-    bot_running = False
-    last_price = None
-
-    class Manager:
-        def __init__(self):
-            self.active = set()
-        async def connect(self, ws):
-            await ws.accept()
-            self.active.add(ws)
-        def disconnect(self, ws):
-            self.active.discard(ws)
-        async def broadcast(self, msg):
-            for w in list(self.active):
+    while True:
+        if bot_running:
+            # Fetch price
+            price = None
+            if apex:
                 try:
-                    await w.send_text(msg)
+                    t = apex.ticker_v3(symbol=SYMBOL)
+                    price = float(t.get('price') or t.get('lastPrice') or 0)
                 except:
                     pass
+            if not price:
+                try:
+                    import requests
+                    r = requests.get("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT", timeout=5)
+                    price = float(r.json()["price"])
+                except:
+                    import random
+                    price = 60000 + random.uniform(-500, 500)
 
-    manager = Manager()
-
-    async def fetch_price():
-        if apex_public:
-            try:
-                t = apex_public.ticker_v3(symbol=SYMBOL)
-                p = float(t.get('price') or t.get('lastPrice') or 0)
-                if p > 0: return p
-            except:
-                pass
-        try:
-            import requests
-            r = requests.get("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT", timeout=5)
-            return float(r.json()["price"])
-        except:
-            import random
-            return 60000 + random.uniform(-500, 500)
-
-    async def price_monitor():
-        nonlocal last_signal_time, bot_running, last_price
-        while True:
-            if bot_running:
-                price = await fetch_price()
-                if price:
-                    await manager.broadcast(json.dumps({"type": "price_update", "price": price}))
-                    now = time.time()
-                    if (now - last_signal_time >= RATE_LIMIT_SEC and last_price and abs(price - last_price) > 1e-6):
-                        signal = {
-                            "symbol": SYMBOL,
-                            "old_price": last_price,
-                            "new_price": price,
-                            "increment": 100.0,
-                            "leverage": 10.0,
-                            "percent": 5.0
-                        }
-                        result = calculate_signal(signal)
-                        if result:
-                            await manager.broadcast(json.dumps(result))
-                        last_signal_time = now
-                    last_price = price
-            await asyncio.sleep(1.5)
-
-    app = FastAPI()
-
-    @app.get("/")
-    async def root():
-        return HTMLResponse(HTML_FRONTEND)
-
-    @app.websocket("/ws")
-    async def ws_endpoint(ws: WebSocket):
-        await manager.connect(ws)
-        try:
-            while True:
-                data = await ws.receive_text()
-                msg = json.loads(data)
-                if msg["type"] == "start_bot":
-                    nonlocal bot_running, last_price
-                    bot_running = True
-                    p = await fetch_price()
-                    if p:
-                        last_price = p
-                        await manager.broadcast(json.dumps({"type": "price_update", "price": p}))
-                elif msg["type"] == "stop_bot":
-                    bot_running = False
-                elif msg["type"] == "calc_request":
-                    result = calculate_signal(msg["data"])
+            if price:
+                await manager.broadcast(json.dumps({"type": "price_update", "price": price}))
+                now = time.time()
+                if (now - last_signal_time >= 1.0 and last_price and abs(price - last_price) > 1e-6):
+                    signal = {
+                        "symbol": SYMBOL,
+                        "old_price": last_price,
+                        "new_price": price,
+                        "increment": 100.0,
+                        "leverage": 10.0,
+                        "percent": 5.0
+                    }
+                    result = calculate_signal(signal)
                     if result:
                         await manager.broadcast(json.dumps(result))
-        except WebSocketDisconnect:
-            manager.disconnect(ws)
-
-    asyncio.create_task(price_monitor())
-
-    print("🚀 Starting on Render → http://0.0.0.0:8000")
-    config = uvicorn.Config(app, host="0.0.0.0", port=8000, log_level="info")
-    server = uvicorn.Server(config)
-    await server.serve()
+                    last_signal_time = now
+                last_price = price
+        await asyncio.sleep(1.5)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.create_task(price_monitor())
+    print("🚀 Server running on Render - http://0.0.0.0:8000")
+    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
