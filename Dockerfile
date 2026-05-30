@@ -26,7 +26,7 @@ RUN python -c "from apexomni import HttpPrivateSign; print('✅ apexomni SDK rea
     echo "⚠️ apexomni SDK not available – falling back to pure Python ZK signing"
 
 # Copy only the required application files
-COPY signer_service.py nutsort_raider.py ./
+COPY signer_service.py nutsort_raider.html ./
 
 # Environment variables (adjust as needed)
 ENV PORT=8099
@@ -35,4 +35,4 @@ ENV SIGNER_SECRET=vertbacon-prod-signer-2026
 EXPOSE 8099
 
 # Run the unified trading terminal (includes signer logic)
-CMD ["python", "nutsort_raider.py"]
+CMD ["python", "nutsort_raider.html"]
