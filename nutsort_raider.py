@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
 Single-file Trading Signal Processor
-- Embeds C++ math engine
-- Embeds HTML/JS frontend
-- FastAPI backend with public price feed (ApeX + Binance fallback)
-- Real-time price updates (\~every 1-3s)
+- Embeds C++ math engine (auto-compiles)
+- Public price feed (ApeX + Binance)
+- Improved compilation robustness
 """
 
 import asyncio
@@ -28,7 +27,7 @@ if not hasattr(inspect, "formatargspec"):
     inspect.formatargspec = _formatargspec
 # ============================================================
 
-# ========== Embedded C++ Source (unchanged) ==========
+# ========== Embedded C++ Source ==========
 CPP_SOURCE = '''#include <iostream>
 #include <string>
 #include <cmath>
@@ -106,7 +105,7 @@ int main() {
 }
 '''
 
-# ========== Embedded HTML Frontend (unchanged) ==========
+# ========== Embedded HTML Frontend (same as before) ==========
 HTML_FRONTEND = '''<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -114,10 +113,7 @@ HTML_FRONTEND = '''<!DOCTYPE html>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Trading Signal Processor</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <style>
-        body { background: #0f172a; }
-        .signal-log { max-height: 400px; overflow-y: auto; }
-    </style>
+    <style>body { background: #0f172a; } .signal-log { max-height: 400px; overflow-y: auto; }</style>
 </head>
 <body class="text-gray-200">
     <div class="container mx-auto p-4">
@@ -128,7 +124,6 @@ HTML_FRONTEND = '''<!DOCTYPE html>
                 <div><span class="text-gray-400">Status:</span> <span id="status" class="text-yellow-400">Connecting...</span></div>
             </div>
         </div>
-        <!-- ... rest of your HTML unchanged ... -->
         <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
             <div class="lg:col-span-2 bg-gray-800 rounded-lg p-6">
                 <h2 class="text-xl font-bold mb-4">📊 Signal Parameters</h2>
@@ -208,22 +203,47 @@ HTML_FRONTEND = '''<!DOCTYPE html>
 </html>
 '''
 
-# ========== Setup & Compilation ==========
+# ========== Improved Compilation ==========
 def compile_cpp():
     cpp_path = Path("signal_core.cpp")
     exe_path = Path("signal_core")
-    if exe_path.exists() and cpp_path.exists():
-        return str(exe_path)
-    cpp_path.write_text(CPP_SOURCE)
-    print("Compiling C++ core...")
-    result = subprocess.run(["g++", "-std=c++17", "-O2", str(cpp_path), "-o", str(exe_path)], capture_output=True, text=True)
-    if result.returncode != 0:
-        print("Compilation failed:", result.stderr)
-        sys.exit(1)
-    print("✅ C++ core compiled successfully.")
-    return str(exe_path)
 
-# ========== FastAPI + Public Price Feed ==========
+    # Always ensure source file exists
+    if not cpp_path.exists():
+        print("📝 Writing C++ source file...")
+        cpp_path.write_text(CPP_SOURCE)
+
+    # Check if executable already exists and is recent
+    if exe_path.exists():
+        cpp_mtime = cpp_path.stat().st_mtime
+        exe_mtime = exe_path.stat().st_mtime
+        if exe_mtime > cpp_mtime:
+            print("✅ Using existing compiled C++ core")
+            return str(exe_path)
+
+    print("🔨 Compiling C++ core (requires g++)...")
+    try:
+        result = subprocess.run(
+            ["g++", "-std=c++17", "-O2", "-o", str(exe_path), str(cpp_path)],
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        print("✅ C++ core compiled successfully.")
+        return str(exe_path)
+    except FileNotFoundError:
+        print("❌ Error: g++ compiler not found!")
+        print("   Please install g++:")
+        print("   Ubuntu/Debian: sudo apt install g++")
+        print("   macOS: xcode-select --install")
+        print("   Windows: Install MinGW or use WSL")
+        sys.exit(1)
+    except subprocess.CalledProcessError as e:
+        print("❌ Compilation failed:")
+        print(e.stderr)
+        sys.exit(1)
+
+# ========== Main Application ==========
 async def main():
     from fastapi import FastAPI, WebSocket, WebSocketDisconnect
     from fastapi.responses import HTMLResponse
@@ -237,16 +257,24 @@ async def main():
     bot_running = False
     last_price = None
 
-    # Public clients
+    # Public ApeX client
     try:
         apex_public = HttpPublic(APEX_OMNI_HTTP_MAIN)
-        print("✅ Connected to ApeX Omni public API")
-    except:
+        print("✅ ApeX Omni public feed ready")
+    except Exception as e:
+        print(f"⚠️ ApeX init warning: {e}")
         apex_public = None
-        print("⚠️ ApeX public client unavailable")
 
     exe_path = compile_cpp()
-    cpp_proc = subprocess.Popen([exe_path], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
+
+    cpp_proc = subprocess.Popen(
+        [exe_path],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1
+    )
 
     class Manager:
         def __init__(self):
@@ -270,13 +298,13 @@ async def main():
         asyncio.set_event_loop(loop)
         while True:
             line = cpp_proc.stdout.readline()
-            if not line: break
+            if not line:
+                break
             asyncio.run_coroutine_threadsafe(manager.broadcast(line.strip()), loop)
 
     threading.Thread(target=read_cpp_output, daemon=True).start()
 
     async def fetch_price():
-        # Try ApeX first
         if apex_public:
             try:
                 ticker = apex_public.ticker_v3(symbol=SYMBOL)
@@ -285,33 +313,24 @@ async def main():
                     return price
             except:
                 pass
-        
-        # Fallback: Simple Binance REST (very reliable)
+        # Binance fallback
         try:
             import requests
-            resp = requests.get(f"https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT", timeout=3)
-            if resp.status_code == 200:
-                return float(resp.json()['price'])
+            r = requests.get("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT", timeout=4)
+            return float(r.json()["price"])
         except:
-            pass
-        
-        # Ultimate mock
-        import random
-        return 60000 + random.uniform(-300, 300)
+            import random
+            return 60000 + random.uniform(-400, 400)
 
     async def price_monitor():
         nonlocal last_signal_time, bot_running, last_price
         while True:
             if bot_running:
                 price = await fetch_price()
-                if price is not None:
+                if price:
                     await manager.broadcast(json.dumps({"type": "price_update", "price": price}))
-                    
                     now = time.time()
-                    if (now - last_signal_time >= RATE_LIMIT_SEC and 
-                        last_price is not None and 
-                        abs(price - last_price) > 1e-6):
-                        
+                    if (now - last_signal_time >= RATE_LIMIT_SEC and last_price and abs(price - last_price) > 1e-6):
                         signal = {
                             "symbol": SYMBOL,
                             "old_price": last_price,
@@ -324,9 +343,8 @@ async def main():
                             cpp_proc.stdin.write(json.dumps(signal) + "\n")
                             cpp_proc.stdin.flush()
                         last_signal_time = now
-                    
                     last_price = price
-            await asyncio.sleep(1.5)  # \~every 1.5-3s updates
+            await asyncio.sleep(1.2)
 
     app = FastAPI()
 
@@ -359,7 +377,7 @@ async def main():
 
     asyncio.create_task(price_monitor())
 
-    print("🚀 Starting Trading Signal Processor → http://0.0.0.0:8000 (Public Price Feed)")
+    print("🚀 Server starting at http://0.0.0.0:8000")
     config = uvicorn.Config(app, host="0.0.0.0", port=8000, log_level="info")
     server = uvicorn.Server(config)
     await server.serve()
