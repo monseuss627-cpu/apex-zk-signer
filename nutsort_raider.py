@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Trading Signal Processor - Optimized for Render.com
+Trading Signal Processor - Fixed for Render.com
 """
 
 import asyncio
@@ -94,7 +94,7 @@ HTML_FRONTEND = '''<!DOCTYPE html>
         let ws = null, running = false;
         function connect() {
             ws = new WebSocket("ws://" + window.location.host + "/ws");
-            ws.onopen = () => document.getElementById("status").innerText = "Connected";
+            ws.onopen = () => document.getElementById("status").innerText = "Connected ✅";
             ws.onmessage = (e) => {
                 const d = JSON.parse(e.data);
                 if (d.type === "price_update") {
@@ -143,10 +143,6 @@ app = FastAPI()
 async def health():
     return {"status": "ok"}
 
-@app.get("/health")
-async def health_check():
-    return {"status": "healthy"}
-
 class Manager:
     def __init__(self):
         self.active = set()
@@ -162,7 +158,6 @@ class Manager:
 
 manager = Manager()
 
-# Background task
 bot_running = False
 last_price = None
 last_signal_time = 0
@@ -170,10 +165,10 @@ last_signal_time = 0
 async def price_monitor():
     global bot_running, last_price, last_signal_time
     while True:
-        if bot_running and last_price:
-            # Simplified price simulation for stability on Render
+        if bot_running and last_price is not None:
             import random
-            price = last_price * (1 + random.uniform(-0.002, 0.002))
+            price = last_price * (1 + random.uniform(-0.0015, 0.0015))
+            
             await manager.broadcast(json.dumps({"type": "price_update", "price": price}))
             
             now = time.time()
@@ -215,6 +210,10 @@ async def websocket_endpoint(websocket: WebSocket):
         manager.disconnect(websocket)
 
 if __name__ == "__main__":
-    asyncio.create_task(price_monitor())
-    print("🚀 Starting on Render...")
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # Properly run the background task
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.create_task(price_monitor())
+    
+    print("🚀 Starting Trading Signal Processor on Render...")
+    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
