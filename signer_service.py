@@ -1,12 +1,12 @@
-""
-ApeX ZK Order Signing Microservice — v3.1.0
+"""
+ApeX ZK Order Signing Microservice - v3.1.0
 Uses apexomni.HttpPrivateSign so the SDK handles all ZK contract
 signing internally. No more manual ContractBuilder math.
 
 Endpoints:
-  GET  /health        — diagnostic, shows what loaded
-  POST /sign-order    — place a signed market/limit order on ApeX Omni
-  POST /sign-withdrawal — (stub, not yet implemented)
+  GET  /health        - diagnostic, shows what loaded
+  POST /sign-order    - place a signed market/limit order on ApeX Omni
+  POST /sign-withdrawal - (stub, not yet implemented)
 """
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -33,7 +33,7 @@ def _try_imports():
     """Import HttpPrivateSign + zklink_sdk and record any failure details."""
     global HttpPrivateSign, zklink_sdk
 
-    # 1) HttpPrivateSign — high-level signed REST client
+    # 1) HttpPrivateSign - high-level signed REST client
     try:
         from apexomni.http_private_sign import HttpPrivateSign as _HPS
         HttpPrivateSign = _HPS
@@ -42,7 +42,7 @@ def _try_imports():
         _import_errors["HttpPrivateSign"] = f"{type(e).__name__}: {e}"
         logger.error("HttpPrivateSign import failed: %s", _import_errors["HttpPrivateSign"])
 
-    # 2) zklink_sdk — required for the SDK's internal signing
+    # 2) zklink_sdk - required for the SDK's internal signing
     try:
         from apexomni import zklink_sdk as _zk
         zklink_sdk = _zk
@@ -139,7 +139,7 @@ def _build_client(req: OrderRequest):
 
 @app.get("/health")
 async def health():
-    """Detailed diagnostic — no silent failures."""
+    """Detailed diagnostic - no silent failures."""
     return {
         "status": "ok" if (HttpPrivateSign and zklink_sdk) else "degraded",
         "version": "3.1.0",
