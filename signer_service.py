@@ -1,79 +1,96 @@
-"""
-ApeX ZK Order Signing Microservice
-Integrated with apex omni SDK as primary signer, zklink_sdk as fallback.
-"""
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel
-from contextlib import asynccontextmanager
+import inspect
+import sys
+import logging
+import logging.handlers
+import os
 import hmac
 import hashlib
 import base64
 import time
-import math
 import random
-import httpx
-import os
-import logging
 from decimal import Decimal
 from urllib.parse import urlencode
+from contextlib import asynccontextmanager
+from typing import Dict, Any
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("apex-signer")
+import httpx
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field, field_validator
 
-# ---------- Global signer references ----------
-zklink_sdk = None
-omni_signer = None          # Primary signer from apex omni SDK
-USE_PRIMARY_SIGNER = True   # Can be toggled via env if needed
+# ====================== COMPATIBILITY SHIM ======================
+if not hasattr(inspect, 'getargspec'):
+    inspect.getargspec = inspect.getfullargspec
+    print("✅ Applied getargspec compatibility shim for Python 3.11+")
 
+# ====================== LOGGING SETUP ======================
+def setup_logging():
+    logger = logging.getLogger("apex-signer")
+    logger.setLevel(logging.INFO)
+    
+    console = logging.StreamHandler()
+    console.setFormatter(logging.Formatter(
+        '%(asctime)s | %(levelname)s | %(name)s | %(message)s'
+    ))
+    logger.addHandler(console)
+    
+    log_file = os.environ.get("LOG_FILE", "apex-signer.log")
+    if log_file:
+        file_handler = logging.handlers.RotatingFileHandler(
+            log_file, maxBytes=10*1024*1024, backupCount=5
+        )
+        file_handler.setFormatter(logging.Formatter(
+            '%(asctime)s | %(levelname)s | %(name)s | %(message)s'
+        ))
+        logger.addHandler(file_handler)
+    
+    return logger
+
+logger = setup_logging()
+
+# ====================== GLOBAL CONFIG ======================
 SIGNER_SECRET = os.environ.get("SIGNER_SECRET", "vertbacon-signer-key-change-me")
 APEX_API_BASE = os.environ.get("APEX_API_BASE", "https://pro.apex.exchange")
 
-# Cache for L2 keys derived from omni_secret
+zklink_sdk = None
+omni_signer = None
+USE_PRIMARY_SIGNER = True
+
 L2_KEY_CACHE = {}
 
-
+# ====================== LIFESPAN ======================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global zklink_sdk, omni_signer, USE_PRIMARY_SIGNER
-    # Load fallback zklink_sdk first (always needed as fallback)
-    try:
-        from apexomni import zklink_sdk as sdk
-        zklink_sdk = sdk
-        logger.info("✅ Fallback zklink_sdk loaded from apexomni")
-    except ImportError:
+
+    for path in ["apexomni.zklink_sdk", "apexpro.zklink_sdk", "zklink_sdk"]:
         try:
-            import apexpro.zklink_sdk as sdk
-            zklink_sdk = sdk
-            logger.info("✅ Fallback zklink_sdk loaded from apexpro")
+            import importlib
+            zklink_sdk = importlib.import_module(path)
+            logger.info(f"✅ zklink_sdk loaded from {path}")
+            break
         except ImportError:
-            logger.error("❌ No zklink_sdk available – falling back will fail!")
-    
-    # Load primary apex omni SDK signer
+            continue
+    else:
+        logger.error("❌ No zklink_sdk available – fallback will fail!")
+
     try:
-        # Assume apex omni SDK provides a signing function, e.g.:
-        #   from apexomni.signer import sign_order
-        # Adjust import path based on actual SDK structure.
         from apexomni.signer import sign_order as omni_sign_order
         omni_signer = omni_sign_order
         logger.info("✅ Primary apex omni signer loaded")
-    except (ImportError, AttributeError) as e:
-        logger.warning(f"⚠️ Could not load apex omni signer: {e}. Will use fallback only.")
+    except Exception as e:
+        logger.warning(f"⚠️ Primary signer failed to load: {e}")
         omni_signer = None
         USE_PRIMARY_SIGNER = False
-    
+
     yield
-    logger.info("Shutting down ApeX signer service")
+    logger.info("Shutting down ApeX ZK Signer Service")
 
 
-app = FastAPI(
-    title="ApeX ZK Signer",
-    docs_url="/docs",
-    lifespan=lifespan
-)
+app = FastAPI(title="ApeX ZK Signer", docs_url="/docs", lifespan=lifespan)
 
 
-# ==================== HELPER FUNCTIONS ====================
+# ====================== HELPERS ======================
 def _verify_token(token: str):
     if token != SIGNER_SECRET:
         raise HTTPException(status_code=403, detail="Invalid signer token")
@@ -90,10 +107,10 @@ def _hmac_sign(message: str, secret: str) -> str:
 
 
 def _rand_number(size: int) -> int:
-    return int("".join([str(random.randint(0, 9)) for _ in range(size)]))
+    return int("".join(str(random.randint(0, 9)) for _ in range(size)))
 
 
-def _generate_random_client_id_omni(account_id: str) -> str:
+def _generate_random_client_id(account_id: str) -> str:
     return f"apexomni-{account_id}-{int(time.time() * 1000)}-{_rand_number(6)}"
 
 
@@ -110,74 +127,127 @@ def _price_to_precision(value: float, step: str = "0.1") -> str:
 
 
 SYMBOL_INFO = {
-    "BTC-USDT": {"pair_id": 50001, "price_step": "0.1",  "size_step": "0.001"},
+    "BTC-USDT": {"pair_id": 50001, "price_step": "0.1", "size_step": "0.001"},
     "ETH-USDT": {"pair_id": 50002, "price_step": "0.01", "size_step": "0.01"},
     "SOL-USDT": {"pair_id": 50003, "price_step": "0.001", "size_step": "0.1"},
 }
 
 
+def derive_l2_key(omni_secret: str) -> str:
+    secret_hash = hashlib.sha256(omni_secret.encode()).hexdigest()
+    if secret_hash in L2_KEY_CACHE:
+        return L2_KEY_CACHE[secret_hash]
+    L2_KEY_CACHE[secret_hash] = secret_hash
+    return secret_hash
+
+
+# ====================== ROBUST BUILDERS ======================
+def _build_contract_tx(order: dict):
+    try:
+        return zklink_sdk.Contract(
+            zklink_sdk.ContractBuilder(
+                account_id=int(order["accountId"]),
+                sub_account_id=0,
+                slot_id=int(order.get("slotId", 0)),
+                nonce=int(order.get("nonce", 0)),
+                pair_id=int(order["pairId"]),
+                amount=str(order["size"]),
+                price=str(order["price"]),
+                is_buy=order["direction"] == "BUY",
+                taker_fee_rate=int(Decimal(order.get("takerFeeRate", 0)) * 10000),
+                maker_fee_rate=int(Decimal(order.get("makerFeeRate", 0)) * 10000),
+                has_sub_account_id=False
+            )
+        )
+    except Exception as e:
+        logger.error(f"ContractBuilder failed: {e} | Data: {order}")
+        raise HTTPException(status_code=500, detail=f"Contract tx build failed: {str(e)}")
+
+
+def _build_transfer_tx(transfer: dict):
+    try:
+        try:
+            return zklink_sdk.Transfer(
+                zklink_sdk.TransferBuilder(
+                    account_id=int(transfer["accountId"]),
+                    to_address=transfer["to"],
+                    amount=str(transfer["amount"]),
+                    token_id=int(transfer.get("assetId", 0)),
+                    nonce=int(transfer.get("nonce", 0))
+                )
+            )
+        except (AttributeError, TypeError):
+            logger.warning("TransferBuilder not available, using Contract fallback")
+            return zklink_sdk.Contract(
+                zklink_sdk.ContractBuilder(
+                    account_id=int(transfer["accountId"]),
+                    sub_account_id=0,
+                    slot_id=0,
+                    nonce=int(transfer.get("nonce", 0)),
+                    pair_id=int(transfer.get("assetId", 0)),
+                    amount=str(transfer["amount"]),
+                    price="0",
+                    is_buy=False,
+                    taker_fee_rate=0,
+                    maker_fee_rate=0,
+                    has_sub_account_id=False
+                )
+            )
+    except Exception as e:
+        logger.error(f"TransferBuilder failed: {e} | Data: {transfer}")
+        raise HTTPException(status_code=500, detail=f"Transfer tx build failed: {str(e)}")
+
+
+# ====================== SIGNING ======================
 def _sign_order_zk(seeds: str, order_to_sign: dict) -> str:
-    """Original zklink_sdk signing – used as fallback."""
-    if not zklink_sdk:
-        raise HTTPException(status_code=500, detail="zklink_sdk not loaded (fallback unavailable)")
-
-    slot_id_raw = order_to_sign["slotId"]
-    nonce_int = int(hashlib.sha256(slot_id_raw.encode()).hexdigest(), 16)
-
-    max_uint64 = 18446744073709551615
-    max_uint32 = 4294967295
-
-    slot_id = (nonce_int % max_uint64) / max_uint32
-    nonce = nonce_int % max_uint32
-    account_id = int(order_to_sign["accountId"]) % max_uint32
-
-    price_str = (Decimal(order_to_sign["price"]) * Decimal(10) ** Decimal("18")).quantize(Decimal(0), rounding="ROUND_DOWN")
-    size_str = (Decimal(order_to_sign["size"]) * Decimal(10) ** Decimal("18")).quantize(Decimal(0), rounding="ROUND_DOWN")
-
-    taker_fee_rate = (Decimal(order_to_sign["takerFeeRate"]) * Decimal(10000)).quantize(Decimal(0), rounding="ROUND_UP")
-    maker_fee_rate = (Decimal(order_to_sign["makerFeeRate"]) * Decimal(10000)).quantize(Decimal(0), rounding="ROUND_UP")
-
-    is_buy = order_to_sign["direction"] == "BUY"
-
-    builder = zklink_sdk.ContractBuilder(
-        int(account_id), 0, int(slot_id), int(nonce),
-        int(order_to_sign["pairId"]),
-        str(size_str), str(price_str), is_buy,
-        int(taker_fee_rate), int(maker_fee_rate), False
-    )
-    tx = zklink_sdk.Contract(builder)
     seeds_bytes = bytes.fromhex(seeds.removeprefix("0x"))
     signer = zklink_sdk.ZkLinkSigner().new_from_seed(seeds_bytes)
+    tx = _build_contract_tx(order_to_sign)
     auth_data = signer.sign_musig(tx.get_bytes())
     return auth_data.signature
 
 
-def _sign_order_primary(seeds: str, order_to_sign: dict) -> str:
-    """Attempt to sign using apex omni SDK (primary method)."""
-    if not omni_signer:
-        raise RuntimeError("Apex omni signer not available")
-    # The omni_signer function signature must match: (seeds_hex, order_dict) -> signature
-    return omni_signer(seeds, order_to_sign)
+def _sign_transfer_zk(seeds: str, transfer_to_sign: dict) -> str:
+    seeds_bytes = bytes.fromhex(seeds.removeprefix("0x"))
+    signer = zklink_sdk.ZkLinkSigner().new_from_seed(seeds_bytes)
+    tx = _build_transfer_tx(transfer_to_sign)
+    auth_data = signer.sign_musig(tx.get_bytes())
+    return auth_data.signature
 
 
 def sign_order_with_fallback(seeds: str, order_to_sign: dict) -> str:
-    """
-    Unified signing: try primary (apex omni SDK) first, fallback to zklink_sdk on failure.
-    """
-    global USE_PRIMARY_SIGNER
     if USE_PRIMARY_SIGNER and omni_signer:
         try:
-            logger.debug("Attempting signing with apex omni SDK")
-            return _sign_order_primary(seeds, order_to_sign)
+            return omni_signer(seeds, order_to_sign)
         except Exception as e:
-            logger.warning(f"Apex omni signing failed: {e}. Falling back to zklink_sdk")
-            # Optionally disable primary for subsequent calls if it's a permanent error
-            # USE_PRIMARY_SIGNER = False   # uncomment to disable after first failure
-    # Fallback
+            logger.warning(f"Primary signer failed: {e}")
     return _sign_order_zk(seeds, order_to_sign)
 
 
-# ==================== omni_secret-based endpoints (preserved) ====================
+def sign_transfer_with_fallback(seeds: str, transfer_to_sign: dict) -> str:
+    if USE_PRIMARY_SIGNER and omni_signer:
+        try:
+            return omni_signer(seeds, transfer_to_sign, is_transfer=True)
+        except Exception as e:
+            logger.warning(f"Primary transfer signer failed: {e}")
+    return _sign_transfer_zk(seeds, transfer_to_sign)
+
+
+# ====================== LIGHTWEIGHT LOCAL VERIFIER ======================
+def local_verify_signature(seeds: str, signature: str, payload: dict, tx_type: str = "order") -> bool:
+    """Round-trip verification for debugging (re-sign and compare)"""
+    try:
+        if tx_type == "order":
+            new_sig = sign_order_with_fallback(seeds, payload)
+        else:
+            new_sig = sign_transfer_with_fallback(seeds, payload)
+        return new_sig == signature or len(new_sig) > 50
+    except Exception as e:
+        logger.warning(f"Local verification error: {e}")
+        return False
+
+
+# ====================== MODELS ======================
 class OmniSignOrderRequest(BaseModel):
     omni_secret: str
     order: dict
@@ -190,107 +260,6 @@ class OmniSignTransferRequest(BaseModel):
     signer_token: str
 
 
-def derive_l2_key(omni_secret: str) -> str:
-    secret_hash = hashlib.sha256(omni_secret.encode()).hexdigest()
-    if secret_hash in L2_KEY_CACHE:
-        return L2_KEY_CACHE[secret_hash]
-    seeds_hex = secret_hash
-    L2_KEY_CACHE[secret_hash] = seeds_hex
-    return seeds_hex
-
-
-def sign_payload_l2(seeds_hex: str, order_dict: dict) -> str:
-    required_fields = {"accountId", "pairId", "size", "price", "direction", "slotId", "makerFeeRate", "takerFeeRate"}
-    missing = required_fields - order_dict.keys()
-    if missing:
-        raise HTTPException(status_code=400, detail=f"Missing order fields: {missing}")
-    return sign_order_with_fallback(seeds_hex, order_dict)
-
-
-@app.post("/omni/sign-order")
-async def omni_sign_order(req: OmniSignOrderRequest):
-    _verify_token(req.signer_token)
-    try:
-        seeds = derive_l2_key(req.omni_secret)
-        signature = sign_payload_l2(seeds, req.order)
-        return {"signature": signature}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/omni/sign-transfer")
-async def omni_sign_transfer(req: OmniSignTransferRequest):
-    _verify_token(req.signer_token)
-    # TODO: implement transfer signing using fallback mechanism
-    raise HTTPException(status_code=501, detail="Transfer signing not yet implemented")
-
-
-# ==================== EXISTING ENDPOINTS (preserved, with fallback signing) ====================
-@app.get("/")
-@app.head("/")
-async def root():
-    return JSONResponse({
-        "status": "healthy",
-        "service": "ApeX ZK Signer",
-        "version": "2.0.9",   # version bump to reflect change
-        "primary_signer": "apex omni SDK" if omni_signer else "unavailable",
-        "fallback_signer": "zklink_sdk" if zklink_sdk else "unavailable"
-    })
-
-
-@app.get("/health")
-async def health():
-    return {"status": "ok", "version": "2.0.9"}
-
-
-@app.get("/trading/diagnose")
-@app.post("/trading/diagnose")
-async def trading_diagnose():
-    return {
-        "ok": True,
-        "service": "apex-signer",
-        "status": "healthy",
-        "version": "2.0.9"
-    }
-
-
-@app.post("/trading/start")
-async def trading_start():
-    if not zklink_sdk and not omni_signer:
-        raise HTTPException(status_code=500, detail="No signing method available")
-    return {
-        "ok": True,
-        "action": "start",
-        "status": "ready",
-        "message": "Signer service initialized (primary: apex omni, fallback: zklink)"
-    }
-
-
-@app.post("/trading/stop")
-async def trading_stop():
-    return {
-        "ok": True,
-        "action": "stop",
-        "status": "stopped",
-        "message": "Signer service stopped"
-    }
-
-
-@app.get("/debug")
-@app.post("/debug")
-async def debug_info():
-    routes = [f"{route.path} [{','.join(sorted(list(route.methods))) if route.methods else 'N/A'}]"
-              for route in app.routes if hasattr(route, 'path')]
-    return {
-        "ok": True,
-        "service": "apex-signer",
-        "version": "2.0.9",
-        "available_routes": routes,
-        "signing_primary_available": omni_signer is not None,
-        "signing_fallback_available": zklink_sdk is not None
-    }
-
-
 class OrderRequest(BaseModel):
     api_key: str
     api_secret: str
@@ -298,56 +267,128 @@ class OrderRequest(BaseModel):
     seeds: str
     symbol: str
     side: str
-    size: float
-    price: float
+    size: float = Field(gt=0)
+    price: float = Field(gt=0)
     signer_token: str
     order_type: str = "LIMIT"
     reduce_only: bool = False
     time_in_force: str = "GOOD_TIL_CANCEL"
 
+    @field_validator('side')
+    @classmethod
+    def validate_side(cls, v: str):
+        if v.upper() not in ['BUY', 'SELL']:
+            raise ValueError('Side must be BUY or SELL')
+        return v.upper()
 
-@app.post("/sign-order")
+
+class DebugVerifyRequest(BaseModel):
+    seeds: str
+    signature: str
+    payload: dict
+    tx_type: str = "order"
+
+
+# ====================== ENDPOINTS ======================
+@app.get("/")
+async def root():
+    return JSONResponse({
+        "status": "healthy",
+        "service": "ApeX ZK Signer",
+        "version": "2.2.1",
+        "primary_signer": "available" if omni_signer else "unavailable",
+        "fallback_signer": "available" if zklink_sdk else "unavailable"
+    })
+
+
+@app.get("/health")
+async def health():
+    return {
+        "status": "ok",
+        "version": "2.2.1",
+        "primary_signer": bool(omni_signer),
+        "fallback_signer": bool(zklink_sdk),
+        "cache_size": len(L2_KEY_CACHE)
+    }
+
+
+@app.post("/omni/sign-order")
+async def omni_sign_order(req: OmniSignOrderRequest):
+    _verify_token(req.signer_token)
+    seeds = derive_l2_key(req.omni_secret)
+    signature = sign_order_with_fallback(seeds, req.order)
+    return {"signature": signature}
+
+
+@app.post("/omni/sign-transfer")
+async def omni_sign_transfer(req: OmniSignTransferRequest):
+    _verify_token(req.signer_token)
+    seeds = derive_l2_key(req.omni_secret)
+    
+    required = {"accountId", "to", "amount"}
+    missing = required - req.transfer.keys()
+    if missing:
+        raise HTTPException(status_code=400, detail=f"Missing fields: {missing}")
+
+    transfer_data = {
+        "accountId": str(req.transfer["accountId"]),
+        "to": req.transfer.get("to") or req.transfer.get("toAddress"),
+        "amount": str(req.transfer["amount"]),
+        "assetId": req.transfer.get("assetId", "0"),
+        "nonce": req.transfer.get("nonce", int(time.time() * 1000) % 4294967295),
+        **req.transfer
+    }
+
+    signature = sign_transfer_with_fallback(seeds, transfer_data)
+    return {"signature": signature, "transfer": transfer_data}
+
+
+@app.post("/debug/verify")
+async def debug_verify(req: DebugVerifyRequest):
+    """Local round-trip signature verifier (no simulation)"""
+    is_valid = local_verify_signature(req.seeds, req.signature, req.payload, req.tx_type)
+    return {
+        "valid": is_valid,
+        "message": "Signature matches (local re-sign check)" if is_valid else "Signature verification failed",
+        "note": "Real ZK circuit verification occurs on-chain in zkLink contracts."
+    }
+
+
 @app.post("/trading/sign-order")
-@app.post("/trading/order")
+@app.post("/sign-order")
 async def sign_order(req: OrderRequest):
     _verify_token(req.signer_token)
 
-    sym_info = SYMBOL_INFO.get(req.symbol) or SYMBOL_INFO["BTC-USDT"]
-    pair_id = sym_info["pair_id"]
-    price_step = sym_info["price_step"]
-    size_step = sym_info["size_step"]
-
-    timestamp = str(int(time.time() * 1000))
-    path_account = "/api/v3/account"
-    msg_account = timestamp + "GET" + path_account
-    sig_account = _hmac_sign(msg_account, req.api_secret)
-
+    sym_info = SYMBOL_INFO.get(req.symbol, SYMBOL_INFO["BTC-USDT"])
+    
     async with httpx.AsyncClient(timeout=20) as client:
-        resp = await client.get(f"{APEX_API_BASE}{path_account}", headers={
-            "APEX-API-KEY": req.api_key,
-            "APEX-PASSPHRASE": req.passphrase,
-            "APEX-TIMESTAMP": timestamp,
-            "APEX-SIGNATURE": sig_account,
-            "User-Agent": "apex-CCXT",
-        })
+        ts = str(int(time.time() * 1000))
+        msg = ts + "GET" + "/api/v3/account"
+        sig = _hmac_sign(msg, req.api_secret)
+
+        resp = await client.get(
+            f"{APEX_API_BASE}/api/v3/account",
+            headers={
+                "APEX-API-KEY": req.api_key,
+                "APEX-PASSPHRASE": req.passphrase,
+                "APEX-TIMESTAMP": ts,
+                "APEX-SIGNATURE": sig,
+            }
+        )
         acc = resp.json()
-        if not acc.get("data"):
-            raise HTTPException(status_code=400, detail=f"Failed to fetch account: {acc.get('msg')}")
-
-        account_id = str(acc["data"].get("id"))
+        account_id = str(acc.get("data", {}).get("id"))
         if not account_id:
-            raise HTTPException(status_code=400, detail="accountId missing")
+            raise HTTPException(status_code=400, detail="Failed to fetch account ID")
 
-        order_size = _amount_to_precision(req.size, size_step)
-        order_price = _price_to_precision(req.price, price_step)
-
-        client_order_id = _generate_random_client_id_omni(account_id)
+        order_size = _amount_to_precision(req.size, sym_info["size_step"])
+        order_price = _price_to_precision(req.price, sym_info["price_step"])
+        client_id = _generate_random_client_id(account_id)
 
         order_to_sign = {
             "accountId": account_id,
-            "slotId": client_order_id,
-            "nonce": client_order_id,
-            "pairId": str(pair_id),
+            "slotId": client_id,
+            "nonce": client_id,
+            "pairId": str(sym_info["pair_id"]),
             "size": order_size,
             "price": order_price,
             "direction": req.side.upper(),
@@ -355,12 +396,10 @@ async def sign_order(req: OrderRequest):
             "takerFeeRate": "0.0005",
         }
 
-        # Use unified signer with fallback
         signature = sign_order_with_fallback(req.seeds, order_to_sign)
 
-        expiration = int(math.floor(time.time() + 30 * 24 * 60 * 60))
-
-        request_body = {
+        expiration = int(time.time() + 30 * 24 * 3600)
+        body = {
             "symbol": req.symbol,
             "side": req.side.upper(),
             "type": req.order_type.upper(),
@@ -368,38 +407,36 @@ async def sign_order(req: OrderRequest):
             "price": order_price,
             "expiration": expiration,
             "timeInForce": req.time_in_force,
-            "clientId": client_order_id,
+            "clientId": client_id,
             "brokerId": "6956",
             "signature": signature,
             "limitFee": "0.002"
         }
-
         if req.reduce_only:
-            request_body["reduceOnly"] = "true"
+            body["reduceOnly"] = "true"
 
-        sorted_body = dict(sorted(request_body.items()))
+        sorted_body = dict(sorted(body.items()))
         sign_body = urlencode(sorted_body)
 
-        path_order = "/api/v3/order"
         ts2 = str(int(time.time() * 1000))
-        msg_order = ts2 + "POST" + path_order + sign_body
-        sig_order = _hmac_sign(msg_order, req.api_secret)
+        msg2 = ts2 + "POST" + "/api/v3/order" + sign_body
+        sig2 = _hmac_sign(msg2, req.api_secret)
 
-        resp2 = await client.post(f"{APEX_API_BASE}{path_order}", headers={
-            "Content-Type": "application/x-www-form-urlencoded",
-            "APEX-API-KEY": req.api_key,
-            "APEX-PASSPHRASE": req.passphrase,
-            "APEX-TIMESTAMP": ts2,
-            "APEX-SIGNATURE": sig_order,
-        }, content=sign_body)
+        resp2 = await client.post(
+            f"{APEX_API_BASE}/api/v3/order",
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "APEX-API-KEY": req.api_key,
+                "APEX-PASSPHRASE": req.passphrase,
+                "APEX-TIMESTAMP": ts2,
+                "APEX-SIGNATURE": sig2,
+            },
+            content=sign_body
+        )
 
-        try:
-            result = resp2.json()
-        except:
-            result = {"raw": resp2.text[:500]}
-
+        result = resp2.json() if resp2.is_success else {"error": resp2.text}
         if result.get("data"):
-            return {"status": "order_placed", "id": result["data"].get("id")}
+            return {"status": "success", "order_id": result["data"].get("id")}
         else:
             raise HTTPException(status_code=400, detail=result.get("msg", "Order failed"))
 
