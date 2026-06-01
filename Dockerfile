@@ -10,9 +10,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY signer_service.py .
+COPY paisley_gittins.py .
 
 ENV PORT=8099
 EXPOSE 8099
 
-CMD ["uvicorn", "signer_service:app", "--host", "0.0.0.0", "--port", "8099"]
+CMD ["uvicorn", "paisley_gittins:app", "--host", "0.0.0.0", "--port", "8099"]
