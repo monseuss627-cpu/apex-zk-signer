@@ -28,7 +28,7 @@ def _try_imports():
     try:
         from apexomni.http_private_v3 import HttpPrivateSign as _HPS
         HttpPrivateSign = _HPS
-        logger.info("✅ Loaded apexomni.http_private_v3.HttpPrivateSign")
+        logger.info("[OK] Loaded apexomni.http_private_v3.HttpPrivateSign")
     except Exception as e:
         _import_errors["HttpPrivateSign"] = f"{type(e).__name__}: {e}"
         logger.error("Import failed: %s", _import_errors["HttpPrivateSign"])
@@ -121,7 +121,7 @@ async def ui():
 </head>
 <body>
 <div style="max-width:1200px;margin:auto">
-    <h1>VertBacon • ApeX Signer v3.6</h1>
+    <h1>VertBacon - ApeX Signer v3.6</h1>
     <p>Signer URL: <input type="text" id="signerUrl" value="https://your-app.onrender.com" style="width:380px"></p>
 
     <div class="tabs">
@@ -147,7 +147,7 @@ async def ui():
     <!-- Clients & Groups -->
     <div id="tab1" class="tab">
         <h2>Clients</h2>
-        <div>rmntg00000 (Active) • Lev: 100x</div>
+        <div>rmntg00000 (Active) - Lev: 100x</div>
         <div>Test Client 1 (Active)</div>
         <h2>Client Groups</h2>
         <div>High Volume Trading Group (2 clients)</div>
@@ -157,7 +157,7 @@ async def ui():
     <!-- Schedules -->
     <div id="tab2" class="tab">
         <h2>Schedules</h2>
-        <div>Morning Trading Schedule • Priority 1 • 30s interval</div>
+        <div>Morning Trading Schedule - Priority 1 - 30s interval</div>
         <button onclick="alert('Schedule active')">Activate Schedule</button>
     </div>
 
@@ -173,7 +173,7 @@ plot(close)</textarea>
 
     <!-- EA Bridge -->
     <div id="tab4" class="tab">
-        <h2>EA Signal Bridge • Client: rmntg00000</h2>
+        <h2>EA Signal Bridge - Client: rmntg00000</h2>
         <button onclick="startEA()">START EA</button>
         <button onclick="forceBuy()">Force BUY</button>
         <button onclick="forceSell()">Force SELL</button>
