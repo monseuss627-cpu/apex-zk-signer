@@ -1,18 +1,11 @@
 #!/usr/bin/env python3
-import sys
+import http.server
+import socketserver
 import os
+import webbrowser
+from threading import Timer
 
-# Ensure no local 'flask.py' shadows the real module
-if os.path.exists(os.path.join(os.getcwd(), 'flask.py')):
-    print("ERROR: Remove or rename 'flask.py' in the current directory.")
-    sys.exit(1)
-
-from flask import Flask, render_template_string
-from werkzeug.serving import run_simple
-
-app = Flask(__name__)
-
-HTML = """<!DOCTYPE html>
+HTML_CONTENT = '''<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -260,17 +253,34 @@ HTML = """<!DOCTYPE html>
     setTimeout(() => { if (currentPrice === 0) setNewPrice(73871.3); }, 1200);
 </script>
 </body>
-</html>"""
+</html>'''
 
-@app.route('/')
-def index():
-    return render_template_string(HTML)
+class CustomHandler(http.server.SimpleHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == '/':
+            self.send_response(200)
+            self.send_header('Content-type', 'text/html; charset=utf-8')
+            self.end_headers()
+            self.wfile.write(HTML_CONTENT.encode('utf-8'))
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+def open_browser():
+    webbrowser.open('http://localhost:5000')
 
 if __name__ == '__main__':
-    print("\n╔══════════════════════════════════════════════════╗")
-    print("║  🚀 Nutsort Raider™ Pro Calculator              ║")
-    print("║  Live price: Binance WebSocket (BTC/USDT)       ║")
-    print("║  Open http://localhost:5000 in your browser     ║")
-    print("╚══════════════════════════════════════════════════╝\n")
-    # Use werkzeug's run_simple to avoid any Flask CLI weirdness
-    run_simple('0.0.0.0', 5000, app, use_reloader=False, threaded=True)
+    PORT = 5000
+    with socketserver.TCPServer(("", PORT), CustomHandler) as httpd:
+        print(f"\n╔══════════════════════════════════════════════════╗")
+        print(f"║  🚀 Nutsort Raider™ Pro Calculator              ║")
+        print(f"║  Server running at http://localhost:{PORT}      ║")
+        print(f"║  Live price feed: Binance WebSocket (BTC/USDT)  ║")
+        print(f"║  Press Ctrl+C to stop                           ║")
+        print(f"╚══════════════════════════════════════════════════╝\n")
+        Timer(1, open_browser).start()
+        try:
+            httpd.serve_forever()
+        except KeyboardInterrupt:
+            print("\nShutting down...")
+            httpd.shutdown()
