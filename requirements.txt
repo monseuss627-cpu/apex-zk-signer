@@ -14,3 +14,4 @@ cryptography==44.0.1
 pycryptodome==3.21.0
 numpy==1.24.3
 mnemonic==0.21
+flask==3.0.3
