@@ -1,9 +1,8 @@
-import sys
 from flask import Flask, render_template_string
 
 app = Flask(__name__)
 
-HTML_TEMPLATE = """
+HTML = """
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -17,7 +16,6 @@ HTML_TEMPLATE = """
             box-sizing: border-box;
             user-select: none;
         }
-
         body {
             background: radial-gradient(circle at 20% 30%, #0a0c12, #010101);
             min-height: 100vh;
@@ -27,8 +25,6 @@ HTML_TEMPLATE = """
             font-family: 'Inter', 'Segoe UI', 'Courier New', monospace;
             padding: 20px;
         }
-
-        /* MAIN TERMINAL PANEL */
         .raider-panel {
             max-width: 620px;
             width: 100%;
@@ -38,10 +34,7 @@ HTML_TEMPLATE = """
             border-radius: 2rem;
             padding: 1.2rem 1.5rem 1.8rem;
             box-shadow: 0 20px 40px rgba(0,0,0,0.6), 0 0 0 1px rgba(0,255,200,0.1) inset, 0 0 12px rgba(0,255,191,0.2);
-            transition: all 0.2s;
         }
-
-        /* header zone */
         .status-bar {
             display: flex;
             justify-content: space-between;
@@ -66,11 +59,9 @@ HTML_TEMPLATE = """
             border-radius: 40px;
             color: #9effcf;
         }
-
         h1 {
             font-size: 1.25rem;
             font-weight: 700;
-            letter-spacing: -0.3px;
             background: linear-gradient(135deg, #c0ffdc, #72f0b0);
             -webkit-background-clip: text;
             background-clip: text;
@@ -87,8 +78,6 @@ HTML_TEMPLATE = """
             border-left: 2px solid #00cc88;
             padding-left: 12px;
         }
-
-        /* SYMBOL ASSET */
         .asset-row {
             background: #0e1219;
             padding: 12px 18px;
@@ -98,7 +87,6 @@ HTML_TEMPLATE = """
             justify-content: space-between;
             align-items: baseline;
             border: 1px solid #2f3e3a;
-            box-shadow: inset 0 1px 3px #00000030, 0 2px 3px #00ffbf10;
         }
         .asset-label {
             font-weight: 500;
@@ -108,7 +96,6 @@ HTML_TEMPLATE = """
         .asset-symbol {
             font-weight: 800;
             font-size: 1.4rem;
-            letter-spacing: 1px;
             background: linear-gradient(145deg, #d4ffea, #87eec2);
             -webkit-background-clip: text;
             background-clip: text;
@@ -120,10 +107,7 @@ HTML_TEMPLATE = """
             font-weight: 700;
             color: #f0ffe0;
             text-shadow: 0 0 6px #0affb0;
-            letter-spacing: 1px;
         }
-
-        /* RESULT MONSTER DISPLAY */
         .result-screen {
             background: #03060c;
             border-radius: 28px;
@@ -131,12 +115,10 @@ HTML_TEMPLATE = """
             margin: 15px 0 18px 0;
             text-align: right;
             border: 1px solid #2effbc30;
-            box-shadow: inset 0 4px 12px #00000055, 0 6px 12px #00000030;
         }
         .result-label {
             font-size: 0.7rem;
             color: #5cffb0;
-            letter-spacing: 2px;
             display: flex;
             justify-content: space-between;
         }
@@ -145,8 +127,6 @@ HTML_TEMPLATE = """
             font-weight: 800;
             font-family: 'Courier New', monospace;
             color: #bcfcd8;
-            word-break: break-word;
-            line-height: 1.2;
         }
         .snapshot-timer {
             font-family: monospace;
@@ -156,8 +136,6 @@ HTML_TEMPLATE = """
             border-radius: 60px;
             color: #aaffdd;
         }
-
-        /* PERCENTAGE + LIVE FEED GRID */
         .live-feed-strip {
             background: #0b0f16;
             border-radius: 24px;
@@ -167,7 +145,6 @@ HTML_TEMPLATE = """
             gap: 20px;
             flex-wrap: wrap;
             justify-content: space-between;
-            border: 1px solid #2d4a3e;
         }
         .percent-control {
             background: #00000055;
@@ -200,14 +177,11 @@ HTML_TEMPLATE = """
             width: 48px;
             border-radius: 40px;
             cursor: pointer;
-            transition: 0.07s linear;
         }
         .pos-neg button:active {
             background: #2b5e49;
             transform: scale(0.96);
         }
-
-        /* INCREMENT PRICE CARD */
         .price-increment {
             background: #00000066;
             border-radius: 36px;
@@ -223,8 +197,6 @@ HTML_TEMPLATE = """
             font-weight: bold;
             color: #e2ffef;
         }
-
-        /* CALCULATOR KEYPAD (exact replica style) */
         .keypad {
             display: grid;
             grid-template-columns: repeat(4, 1fr);
@@ -241,7 +213,6 @@ HTML_TEMPLATE = """
             color: #bcffde;
             border-radius: 28px;
             box-shadow: 0 2px 0 #2f6d56;
-            transition: 0.04s linear;
             cursor: pointer;
         }
         .key-btn:active {
@@ -257,8 +228,6 @@ HTML_TEMPLATE = """
             background: #3a2420;
             color: #ffbea3;
         }
-
-        /* PLACE BUTTON (main trigger) */
         .place-holder {
             margin-top: 12px;
             text-align: center;
@@ -273,20 +242,15 @@ HTML_TEMPLATE = """
             letter-spacing: 2px;
             color: #010b07;
             border-radius: 60px;
-            font-family: monospace;
             cursor: pointer;
-            box-shadow: 0 0 12px #00ffb360;
-            transition: 0.08s linear;
             text-transform: uppercase;
         }
         .place-btn:active {
             transform: scale(0.98);
-            background: linear-gradient(95deg, #00b37a, #0bf59f);
         }
         .place-btn.disabled {
             opacity: 0.6;
             pointer-events: none;
-            filter: grayscale(0.2);
         }
         .footer-note {
             margin-top: 16px;
@@ -306,18 +270,6 @@ HTML_TEMPLATE = """
         button {
             cursor: pointer;
         }
-        input {
-            background: transparent;
-            border: none;
-            color: #b1ffdb;
-            font-size: 1.4rem;
-            width: 80px;
-            text-align: center;
-            font-weight: bold;
-        }
-        input:focus {
-            outline: none;
-        }
     </style>
 </head>
 <body>
@@ -329,14 +281,12 @@ HTML_TEMPLATE = """
     <h1>Nutsort Raider™ Pro Calculator</h1>
     <div class="sub">OMNI · REAL TIME · V3.1.0 — SNAPSHOT ENGINE</div>
 
-    <!-- symbol pair increment display -->
     <div class="asset-row">
         <span class="asset-label">PERPETUAL SYMBOL ASSET</span>
         <span class="asset-symbol">BTC-USDT</span>
         <div class="increment-price" id="liveIncrementPrice">--</div>
     </div>
 
-    <!-- result & snapshot section -->
     <div class="result-screen">
         <div class="result-label">
             <span>📐 RESULT (PRICE × %)</span>
@@ -346,7 +296,6 @@ HTML_TEMPLATE = """
         <div class="flash-msg" id="snapshotStatusMsg">↻ LIVE MODE · PLACE TO FREEZE 45S</div>
     </div>
 
-    <!-- % value and increment block -->
     <div class="live-feed-strip">
         <div class="percent-control">
             <span style="color:#92ffcb;">% VALUE</span>
@@ -362,30 +311,25 @@ HTML_TEMPLATE = """
         </div>
     </div>
 
-    <!-- FULL KEYPAD (matching reference images) -->
     <div class="keypad">
         <button class="key-btn" data-num="7">7</button>
         <button class="key-btn" data-num="8">8</button>
         <button class="key-btn" data-num="9">9</button>
         <button class="key-btn operator" data-op="divide">/</button>
-
         <button class="key-btn" data-num="4">4</button>
         <button class="key-btn" data-num="5">5</button>
         <button class="key-btn" data-num="6">6</button>
         <button class="key-btn operator" data-op="multiply">*</button>
-
         <button class="key-btn" data-num="1">1</button>
         <button class="key-btn" data-num="2">2</button>
         <button class="key-btn" data-num="3">3</button>
         <button class="key-btn operator" data-op="minus">-</button>
-
         <button class="key-btn clear-btn" id="clearPercent">C</button>
         <button class="key-btn" data-num="0">0</button>
         <button class="key-btn" id="percentKey">%</button>
         <button class="key-btn operator" data-op="plus">+</button>
     </div>
 
-    <!-- PLACE BUTTON (the only core interactive trigger for snapshot) -->
     <div class="place-holder">
         <button id="placeSnapshotBtn" class="place-btn">PLACE · HOLD FEED 45S</button>
     </div>
@@ -396,19 +340,15 @@ HTML_TEMPLATE = """
 </div>
 
 <script>
-    // --------------------------------------------
-    // REAL-TIME PRICE FEED (Binance WebSocket low latency)
-    // --------------------------------------------
     let currentPrice = 0;
-    let percentValue = 5;       // default %
+    let percentValue = 5;
     let snapshotActive = false;
     let snapshotEndTime = 0;
     let frozenResult = 0;
     let snapshotPriceUsed = 0;
     let snapshotPercentUsed = 0;
     let countdownInterval = null;
-    
-    // DOM elements
+
     const liveIncSpan = document.getElementById('liveIncrementPrice');
     const btcIncSpan = document.getElementById('btcPriceIncrement');
     const resultDiv = document.getElementById('calculationResult');
@@ -416,65 +356,31 @@ HTML_TEMPLATE = """
     const snapshotTimerSpan = document.getElementById('snapshotTimerDisplay');
     const snapshotMsgSpan = document.getElementById('snapshotStatusMsg');
     const placeBtn = document.getElementById('placeSnapshotBtn');
-    
-    // Helper: update displayed percent value
-    function updatePercentUI() {
-        percentDisplaySpan.innerText = percentValue;
-        // also update any input field? keep consistent
-        if (!snapshotActive) {
-            computeAndShowResult(currentPrice, percentValue);
-        } else {
-            // if snapshot active, result remains frozen, but we don't override UI result
-            // just ensure the frozen result still displays
-            resultDiv.innerText = formatNumber(frozenResult);
-        }
-    }
-    
-    // Format number with commas and decimals
+
     function formatNumber(num) {
         if (num === undefined || isNaN(num)) return "0.00";
         return num.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 6 });
     }
-    
-    // Live compute: price * (percent/100)
+
     function computeAndShowResult(price, percent) {
         if (price === 0) {
             resultDiv.innerText = "0.00";
-            return;
+            return 0;
         }
         let calc = price * (percent / 100);
         resultDiv.innerText = formatNumber(calc);
         return calc;
     }
-    
-    // Freeze snapshot logic (triggered by PLACE button)
-    function start45sSnapshot() {
-        if (snapshotActive) {
-            // reset previous snapshot
-            clearSnapshotTimer();
+
+    function updatePercentUI() {
+        percentDisplaySpan.innerText = percentValue;
+        if (!snapshotActive) {
+            computeAndShowResult(currentPrice, percentValue);
+        } else {
+            resultDiv.innerText = formatNumber(frozenResult);
         }
-        if (currentPrice === 0) {
-            snapshotMsgSpan.innerText = "⚠️ waiting for price feed...";
-            return;
-        }
-        // capture current price & percent
-        snapshotPriceUsed = currentPrice;
-        snapshotPercentUsed = percentValue;
-        const computed = snapshotPriceUsed * (snapshotPercentUsed / 100);
-        frozenResult = computed;
-        resultDiv.innerText = formatNumber(frozenResult);
-        snapshotActive = true;
-        const now = Date.now();
-        snapshotEndTime = now + 45000;
-        
-        // update UI
-        snapshotMsgSpan.innerHTML = "🔒 SNAPSHOT ACTIVE · 45s FREEZE · NO ORDER";
-        snapshotMsgSpan.style.color = "#fff0b0";
-        placeBtn.classList.add('disabled');
-        placeBtn.innerText = "⏳ SNAPSHOT LOCKED (45s)";
-        startCountdownDisplay();
     }
-    
+
     function startCountdownDisplay() {
         if (countdownInterval) clearInterval(countdownInterval);
         countdownInterval = setInterval(() => {
@@ -484,7 +390,6 @@ HTML_TEMPLATE = """
             }
             const remaining = Math.max(0, snapshotEndTime - Date.now());
             if (remaining <= 0) {
-                // snapshot finished
                 clearSnapshotTimer();
                 snapshotActive = false;
                 snapshotMsgSpan.innerHTML = "✅ SNAPSHOT ENDED · LIVE MODE RESTORED";
@@ -492,7 +397,6 @@ HTML_TEMPLATE = """
                 snapshotTimerSpan.innerText = "⚡ live";
                 placeBtn.classList.remove('disabled');
                 placeBtn.innerText = "PLACE · HOLD FEED 45S";
-                // recalc with latest price & current percent
                 computeAndShowResult(currentPrice, percentValue);
                 return;
             }
@@ -500,91 +404,79 @@ HTML_TEMPLATE = """
             snapshotTimerSpan.innerText = `⏱️ ${seconds}s frozen`;
         }, 200);
     }
-    
+
     function clearSnapshotTimer() {
         if (countdownInterval) {
             clearInterval(countdownInterval);
             countdownInterval = null;
         }
     }
-    
-    // reset snapshot if expired after price update
-    function checkSnapshotExpiry() {
-        if (snapshotActive && Date.now() >= snapshotEndTime) {
-            snapshotActive = false;
-            snapshotMsgSpan.innerHTML = "🔄 SNAPSHOT DONE · LIVE MODE";
-            snapshotMsgSpan.style.color = "#6effc8";
-            snapshotTimerSpan.innerText = "⚡ live";
-            placeBtn.classList.remove('disabled');
-            placeBtn.innerText = "PLACE · HOLD FEED 45S";
-            computeAndShowResult(currentPrice, percentValue);
-            if (countdownInterval) clearInterval(countdownInterval);
+
+    function start45sSnapshot() {
+        if (snapshotActive) {
+            clearSnapshotTimer();
         }
+        if (currentPrice === 0) {
+            snapshotMsgSpan.innerText = "⚠️ waiting for price feed...";
+            return;
+        }
+        snapshotPriceUsed = currentPrice;
+        snapshotPercentUsed = percentValue;
+        frozenResult = snapshotPriceUsed * (snapshotPercentUsed / 100);
+        resultDiv.innerText = formatNumber(frozenResult);
+        snapshotActive = true;
+        snapshotEndTime = Date.now() + 45000;
+        snapshotMsgSpan.innerHTML = "🔒 SNAPSHOT ACTIVE · 45s FREEZE · NO ORDER";
+        snapshotMsgSpan.style.color = "#fff0b0";
+        placeBtn.classList.add('disabled');
+        placeBtn.innerText = "⏳ SNAPSHOT LOCKED (45s)";
+        startCountdownDisplay();
     }
-    
-    // price update from WebSocket (Binance)
+
     function setNewPrice(priceRaw) {
         let price = parseFloat(priceRaw);
         if (isNaN(price)) return;
         currentPrice = price;
-        // update increment displays
         liveIncSpan.innerText = `$${currentPrice.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2})}`;
         btcIncSpan.innerText = `$${currentPrice.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2})}`;
-        
-        // if no snapshot active -> live recalculation
         if (!snapshotActive) {
             computeAndShowResult(currentPrice, percentValue);
         } else {
-            // snapshot active: check expiry first, if expired then release
-            checkSnapshotExpiry();
-            if (!snapshotActive) {
+            if (Date.now() >= snapshotEndTime) {
+                snapshotActive = false;
+                snapshotMsgSpan.innerHTML = "🔄 SNAPSHOT DONE · LIVE MODE";
+                snapshotMsgSpan.style.color = "#6effc8";
+                snapshotTimerSpan.innerText = "⚡ live";
+                placeBtn.classList.remove('disabled');
+                placeBtn.innerText = "PLACE · HOLD FEED 45S";
                 computeAndShowResult(currentPrice, percentValue);
+                if (countdownInterval) clearInterval(countdownInterval);
             } else {
-                // still frozen, keep frozenResult on screen
                 resultDiv.innerText = formatNumber(frozenResult);
             }
         }
     }
-    
-    // WebSocket connection to Binance (BTCUSDT trade stream - ultra low latency)
-    let ws = null;
+
     function initWebSocket() {
-        if (ws) ws.close();
-        ws = new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@trade');
+        let ws = new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@trade');
         ws.onmessage = (event) => {
             try {
                 const data = JSON.parse(event.data);
                 if (data && data.p) {
                     setNewPrice(data.p);
                 }
-            } catch(e) { /* silent */ }
+            } catch(e) {}
         };
-        ws.onerror = (err) => {
-            console.warn("WS error, reconnecting...");
-            setTimeout(initWebSocket, 2000);
-        };
-        ws.onclose = () => {
-            setTimeout(initWebSocket, 2000);
-        };
+        ws.onerror = () => setTimeout(initWebSocket, 2000);
+        ws.onclose = () => setTimeout(initWebSocket, 2000);
     }
-    
-    // KEYPAD & PERCENT HANDLERS
-    // numeric keypad: update percent value
+
     function setPercentValue(newVal) {
-        let val = newVal;
-        if (isNaN(val)) val = percentValue;
-        val = Math.min(100, Math.max(0, val));
+        let val = Math.min(100, Math.max(0, newVal));
         percentValue = val;
         updatePercentUI();
-        if (!snapshotActive) {
-            computeAndShowResult(currentPrice, percentValue);
-        } else {
-            // snapshot active: we do NOT modify frozenResult, but we store updated percent for after snapshot.
-            // just keep frozen result.
-            resultDiv.innerText = formatNumber(frozenResult);
-        }
     }
-    
+
     document.querySelectorAll('.key-btn[data-num]').forEach(btn => {
         btn.addEventListener('click', () => {
             if (snapshotActive) {
@@ -597,32 +489,16 @@ HTML_TEMPLATE = """
             setPercentValue(newPercent);
         });
     });
-    
-    document.getElementById('clearPercent').addEventListener('click', () => {
-        if (snapshotActive) return;
-        setPercentValue(0);
-    });
-    document.getElementById('percentKey').addEventListener('click', () => {
-        if (snapshotActive) return;
-        // set % as same (just style)
-    });
-    document.getElementById('posBtn').addEventListener('click', () => {
-        if (snapshotActive) return;
-        setPercentValue(percentValue + 1);
-    });
-    document.getElementById('negBtn').addEventListener('click', () => {
-        if (snapshotActive) return;
-        setPercentValue(percentValue - 1);
-    });
-    // operators (non functional UI but match design - they don't affect core snapshot but maintains replica)
-    document.querySelectorAll('[data-op]').forEach(opBtn => {
-        opBtn.addEventListener('click', (e) => {
+    document.getElementById('clearPercent').addEventListener('click', () => { if (!snapshotActive) setPercentValue(0); });
+    document.getElementById('posBtn').addEventListener('click', () => { if (!snapshotActive) setPercentValue(percentValue + 1); });
+    document.getElementById('negBtn').addEventListener('click', () => { if (!snapshotActive) setPercentValue(percentValue - 1); });
+    document.getElementById('percentKey').addEventListener('click', () => {});
+    document.querySelectorAll('[data-op]').forEach(btn => {
+        btn.addEventListener('click', () => {
             if(!snapshotActive) snapshotMsgSpan.innerText = "⚡ Live mode • use +/- or digits for %";
             else snapshotMsgSpan.innerText = "❄️ Snapshot frozen – wait 45s";
         });
     });
-    
-    // PLACE BUTTON: trigger 45s snapshot
     placeBtn.addEventListener('click', () => {
         if (snapshotActive) {
             snapshotMsgSpan.innerText = "⏳ snapshot already running, wait for release";
@@ -634,15 +510,10 @@ HTML_TEMPLATE = """
         }
         start45sSnapshot();
     });
-    
-    // initial load
+
     initWebSocket();
     setPercentValue(5);
-    computeAndShowResult(0, 5);
-    // fallback to demo price if websocket delayed
-    setTimeout(() => {
-        if (currentPrice === 0) setNewPrice(73871.3);
-    }, 1200);
+    setTimeout(() => { if (currentPrice === 0) setNewPrice(73871.3); }, 1200);
 </script>
 </body>
 </html>
@@ -650,15 +521,12 @@ HTML_TEMPLATE = """
 
 @app.route('/')
 def index():
-    return render_template_string(HTML_TEMPLATE)
+    return render_template_string(HTML)
 
 if __name__ == '__main__':
-    print("""
-    ╔══════════════════════════════════════════════╗
-    ║  🚀 NUTSORT RAIDER™ PRO CALCULATOR           ║
-    ║  LIVE PRICE FEED (Binance WebSocket)        ║
-    ║  PLACE button → 45s snapshot (price × %)    ║
-    ║  Access: http://localhost:5000              ║
-    ╚══════════════════════════════════════════════╝
-    """)
+    print("\n╔══════════════════════════════════════════════════╗")
+    print("║  🚀 Nutsort Raider™ Pro Calculator              ║")
+    print("║  Live price: Binance WebSocket (BTC/USDT)       ║")
+    print("║  Open http://localhost:5000 in your browser     ║")
+    print("╚══════════════════════════════════════════════════╝\n")
     app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
