@@ -1,4 +1,4 @@
-apexomni-x86-windows-linux==3.2.0
+apexpro==1.2.0
 fastapi==0.115.12
 uvicorn==0.34.0
 httpx==0.28.1
