@@ -9,7 +9,7 @@ ecdsa==0.16.0
 sympy==1.6
 mpmath==1.0.0
 eth-account==0.5.9
-websockets==13.0
+websockets==9.2
 cryptography==44.0.1
 pycryptodome==3.21.0
 numpy==1.24.3
