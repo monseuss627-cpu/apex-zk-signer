@@ -4,7 +4,7 @@ uvicorn==0.34.0
 httpx==0.28.1
 pydantic==2.10.6
 requests==2.32.3
-web3==6.19.0
+web3==5.31.4
 ecdsa==0.16.0
 sympy==1.6
 mpmath==1.0.0
