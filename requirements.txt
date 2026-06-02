@@ -1,16 +1,23 @@
-apexpro==1.2.0
+# Exact versions for apexpro 1.1.10 and its dependencies
+apexpro==1.1.10
+web3==5.31.4                 # web3>=5.0.0,<6.0.0
+eth-account==0.5.9           # eth-account>=0.4.0,<0.6.0
+eth-keys==0.5.1              # compatible with eth-account
+websockets==9.2              # compatible with web3 5.x
+requests==2.32.3             # requests>=2.22.0,<3.0.0
+websocket-client==1.8.0      # used internally by apexpro
+dateparser==1.0.0
+ecdsa==0.16.0
+mpmath==1.0.0
+sympy==1.6
+setuptools==50.3.2
+mnemonic==0.21
+
+# Other top-level dependencies (no conflicts with apexpro)
 fastapi==0.115.12
 uvicorn==0.34.0
 httpx==0.28.1
 pydantic==2.10.6
-requests==2.32.3
-web3==5.31.4
-ecdsa==0.16.0
-sympy==1.6
-mpmath==1.0.0
-eth-account==0.5.9
-websockets==9.0.2
 cryptography==44.0.1
 pycryptodome==3.21.0
 numpy==1.24.3
-mnemonic==0.21
