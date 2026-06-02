@@ -8,7 +8,7 @@ web3==6.19.0
 ecdsa==0.16.0
 sympy==1.11.1
 mpmath==1.3.0
-eth-account==0.11.2
+eth-account==0.5.9
 websockets==13.0
 cryptography==44.0.1
 pycryptodome==3.21.0
