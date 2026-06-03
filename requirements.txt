@@ -48,6 +48,6 @@ jsonschema==4.17.3
 
 lru-dict==1.2.0
 
-protobuf==3.19.4
+protobuf==3.19.5
 
 requests==2.31.0
