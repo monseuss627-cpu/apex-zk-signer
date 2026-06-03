@@ -2,7 +2,6 @@
 apexpro==1.1.9
 
 # Networking
-requests==2.32.5                # requests >=2.22.0, <3.0.0
 httpx==0.28.1
 websocket-client==1.9.0                 
 
