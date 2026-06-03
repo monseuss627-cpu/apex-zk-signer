@@ -4,8 +4,7 @@ apexpro==1.1.9
 # Networking
 requests==2.32.5                # requests >=2.22.0, <3.0.0
 httpx==0.28.1
-websocket-client==1.9.0
-websockets==9.2                 # required by web3<6.0.0
+websocket-client==1.9.0                 
 
 # Ethereum & cryptography
 web3==5.31.4                    # web3 >=5.0.0, <6.0.0
