@@ -8,6 +8,7 @@ This service mirrors CCXT's `apex.create_order` + `get_zk_contract_signature_obj
 implementations EXACTLY so ApeX accepts the ZK signature.
 """
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware  # <-- ADDED IMPORT
 from pydantic import BaseModel
 from typing import Optional, Dict, Any
 import hmac
@@ -26,6 +27,16 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("apex-signer")
 
 app = FastAPI(title="ApeX ZK Signer", docs_url="/docs")
+
+# === CORS MIDDLEWARE ADDED HERE (Option 1 fix) ===
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],          # Allows all origins (use ["*"] for development)
+    allow_credentials=True,
+    allow_methods=["*"],          # Allows GET, POST, etc.
+    allow_headers=["*"],          # Allows all headers
+)
+# =================================================
 
 zklink_sdk = None
 SIGNER_SECRET = os.environ.get("SIGNER_SECRET", "vertbacon-signer-key-change-me")
@@ -338,5 +349,3 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8099))
     uvicorn.run(app, host="0.0.0.0", port=port)
-
-
