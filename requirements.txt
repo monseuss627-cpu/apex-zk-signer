@@ -1,54 +1,11 @@
-# Core SDK
-apexpro==1.1.9
-
-# Networking
-httpx==0.28.1
-websocket-client==1.9.0                 
-
-# Ethereum & cryptography
-web3==5.31.4                    # web3 >=5.0.0, <6.0.0
-eth-account==0.5.9              # eth-account >=0.4.0, <0.6.0
-eth-keys==0.3.4
-ecdsa==0.16.0                   # exactly 0.16.0
-cryptography==44.0.1
-pycryptodome==3.21.0
-mnemonic==0.21
-
-# Date parsing
-dateparser==1.0.0
-
-# Math & symbolic
-mpmath==1.0.0
-sympy==1.6
-
-# API server
-fastapi==0.115.12
-uvicorn==0.34.0
-pydantic==2.10.6
-
-# Utilities
-numpy==1.24.3
-web3==5.31.4
-eth-account==0.5.9
-websockets==9.1
-
-eth-abi==2.2.0
-eth-hash==0.3.3
-eth-rlp==0.2.1
-eth-typing==2.3.0
-eth-utils==1.10.0
-
-hexbytes==0.3.1
-
-aiohttp==3.8.6
-
-ipfshttpclient==0.8.0a2
-
-jsonschema==4.17.3
-
-lru-dict==1.2.0
-
-protobuf==3.19.5
-
-requests==2.31.0
-
+apexomni-x86-windows-linux>=3.2.0
+fastapi>=0.104.0
+uvicorn>=0.24.0
+httpx>=0.25.0
+pydantic>=2.0.0
+requests>=2.28.0
+web3>=6.0.0
+ecdsa>=0.18.0
+sympy==1.11.1
+mpmath>=1.3.0
+eth-account>=0.9.0
