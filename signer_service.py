@@ -3,9 +3,11 @@ ApeX ZK Order Signing Microservice
 Deploy on any x86_64 Linux server.
 Handles ZK contract signatures for ApeX order submission.
 Called via HTTP from the main VertBacon app.
+
+This service mirrors CCXT's `apex.create_order` + `get_zk_contract_signature_obj`
+implementations EXACTLY so ApeX accepts the ZK signature.
 """
 from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, Dict, Any
 import hmac
@@ -24,15 +26,6 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("apex-signer")
 
 app = FastAPI(title="ApeX ZK Signer", docs_url="/docs")
-
-# CORS middleware – allows your frontend to call this endpoint
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 zklink_sdk = None
 SIGNER_SECRET = os.environ.get("SIGNER_SECRET", "vertbacon-signer-key-change-me")
@@ -60,20 +53,13 @@ class OrderRequest(BaseModel):
     api_secret: str
     passphrase: str
     seeds: str
-    symbol: str
-    side: str
+    symbol: str          # e.g. "BTC-USDT"
+    side: str            # "BUY" or "SELL"
     size: float
     price: float
     signer_token: str
     reduce_only: bool = False
     time_in_force: str = "GOOD_TIL_CANCEL"
-
-
-class AccountRequest(BaseModel):
-    api_key: str
-    api_secret: str
-    passphrase: str
-    signer_token: str
 
 
 class WithdrawRequest(BaseModel):
@@ -98,6 +84,8 @@ def _string_to_base64(s: str) -> str:
 
 
 def _hmac_sign(message: str, secret: str) -> str:
+    """HMAC-SHA256 with base64-encoded secret key, returns base64 signature.
+    Matches CCXT's self.hmac(msg, base64(secret), sha256, 'base64')."""
     key = _string_to_base64(secret).encode()
     sig = hmac.new(key, message.encode(), hashlib.sha256).digest()
     return base64.standard_b64encode(sig).decode()
@@ -108,10 +96,12 @@ def _rand_number(size: int) -> int:
 
 
 def _generate_random_client_id_omni(account_id: str) -> str:
+    """Mirror CCXT: 'apexomni-{accountId}-{ms}-{rand6}'"""
     return f"apexomni-{account_id}-{int(time.time() * 1000)}-{_rand_number(6)}"
 
 
 def _amount_to_precision(value: float, step: str = "0.001") -> str:
+    """Truncate to step precision (ROUND_DOWN)."""
     step_d = Decimal(step)
     v = (Decimal(str(value)) // step_d) * step_d
     return format(v.quantize(step_d), "f")
@@ -123,6 +113,7 @@ def _price_to_precision(value: float, step: str = "0.1") -> str:
     return format(v.quantize(step_d), "f")
 
 
+# Per-symbol precision / l2PairId (CCXT market info)
 SYMBOL_INFO = {
     "BTC-USDT":  {"pair_id": 50001, "price_step": "0.1",  "size_step": "0.001"},
     "ETH-USDT":  {"pair_id": 50002, "price_step": "0.01", "size_step": "0.01"},
@@ -131,6 +122,10 @@ SYMBOL_INFO = {
 
 
 def _sign_order_zk(seeds: str, order_to_sign: dict) -> str:
+    """
+    Sign a contract order using zklink_sdk. EXACT port of CCXT
+    base/exchange.py::get_zk_contract_signature_obj.
+    """
     if not zklink_sdk:
         raise HTTPException(status_code=500, detail="zklink_sdk not loaded")
 
@@ -186,34 +181,12 @@ async def health():
     }
 
 
-@app.post("/account")
-async def get_account(req: AccountRequest):
-    """
-    Fetch real account details (including balance & equity) from Apex.
-    """
-    _verify_token(req.signer_token)
-    timestamp = str(int(time.time() * 1000))
-    path_account = "/api/v3/account"
-    msg_account = timestamp + "GET" + path_account
-    sig_account = _hmac_sign(msg_account, req.api_secret)
-
-    async with httpx.AsyncClient(timeout=20) as client:
-        resp = await client.get(
-            f"{APEX_API_BASE}{path_account}",
-            headers={
-                "APEX-API-KEY": req.api_key,
-                "APEX-PASSPHRASE": req.passphrase,
-                "APEX-TIMESTAMP": timestamp,
-                "APEX-SIGNATURE": sig_account,
-                "User-Agent": "apex-CCXT",
-                "Accept": "application/json",
-            },
-        )
-        return resp.json()
-
-
 @app.post("/sign-order")
 async def sign_order(req: OrderRequest):
+    """
+    Build + sign + submit an ApeX market order.
+    Mirrors ccxt.apex.create_order + get_zk_contract_signature_obj exactly.
+    """
     _verify_token(req.signer_token)
     if not zklink_sdk:
         raise HTTPException(status_code=500, detail="zklink_sdk not loaded")
@@ -223,6 +196,7 @@ async def sign_order(req: OrderRequest):
     price_step = sym_info["price_step"]
     size_step = sym_info["size_step"]
 
+    # Step 1 — GET /api/v3/account to obtain numeric accountId
     timestamp = str(int(time.time() * 1000))
     path_account = "/api/v3/account"
     msg_account = timestamp + "GET" + path_account
@@ -250,16 +224,19 @@ async def sign_order(req: OrderRequest):
             return {"error": "accountId missing in /v3/account response"}
         account_id = str(account_id)
 
+        # Precision-adjusted strings
         order_size = _amount_to_precision(req.size, size_step)
         order_price = _price_to_precision(req.price, price_step)
 
         taker = "0.0005"
         maker = "0.0002"
 
+        # limitFee = (price * size * taker) + price_step
         fee_val = (Decimal(order_price) * Decimal(order_size) * Decimal(taker)) + Decimal(price_step)
         step_d = Decimal(price_step)
         limit_fee = format(((fee_val // step_d) * step_d).quantize(step_d), "f")
 
+        # CCXT-format clientOrderId
         client_order_id = _generate_random_client_id_omni(account_id)
 
         order_to_sign = {
@@ -361,3 +338,5 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8099))
     uvicorn.run(app, host="0.0.0.0", port=port)
+
+
