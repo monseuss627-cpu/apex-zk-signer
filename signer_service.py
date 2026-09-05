@@ -206,8 +206,9 @@ def _sign_withdrawal_zk(seeds: str, account_id: str, nonce: int, asset_id: int, 
     return auth_data.signature
 
 
-# ---------- Root & Health (with HEAD support) ----------
-@app.get("/")
+# ---------- Root & Health (with HEAD support via app.api_route) ----------
+# Use api_route to handle all methods for root
+@app.api_route("/", methods=["GET", "HEAD"])
 async def root():
     return {
         "service": "ApeX ZK Signer",
@@ -224,13 +225,7 @@ async def root():
     }
 
 
-@app.head("/")
-async def root_head():
-    """HEAD request support for health checks."""
-    return Response(headers={"Content-Type": "application/json"})
-
-
-@app.get("/health")
+@app.api_route("/health", methods=["GET", "HEAD"])
 async def health():
     return {
         "status": "ok",
@@ -238,12 +233,6 @@ async def health():
         "version": "2.1.0",
         "api_base": APEX_API_BASE,
     }
-
-
-@app.head("/health")
-async def health_head():
-    """HEAD request support for health checks."""
-    return Response(headers={"Content-Type": "application/json"})
 
 
 # ---------- Sign Order ----------
