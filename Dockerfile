@@ -1,15 +1,18 @@
-# Use a slim Python 3.11 base
 FROM python:3.11-slim
 
-# Set working directory
 WORKDIR /app
 
-# Install system dependencies for supervisor and any build tools (if needed)
+# Install system dependencies for supervisor and build tools (for cryptography/rust)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     supervisor \
+    gcc \
+    g++ \
+    make \
+    rustc \
+    cargo \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy combined requirements file
+# Copy and install dependencies
 COPY requirements-merged.txt .
 RUN pip install --no-cache-dir -r requirements-merged.txt
 
@@ -20,17 +23,16 @@ COPY signer_service.py .
 # Copy supervisor configuration
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 
-# Expose ports for both services
+# Expose ports
 EXPOSE 8000 8099
 
 # Environment variables (override as needed)
 ENV PORT=8000
 ENV LOGLEVEL=INFO
 ENV CODEWORDS_API_KEY=your_api_key
-ENV CODEWORDS_RUNTIME_URI=redis://localhost:6379   # adjust if Redis is separate
-ENV SIGNER_SECRET=vertbacon-signer-key-change-me
+ENV CODEWORDS_RUNTIME_URI=redis://localhost:6379
+ENV SIGNER_SECRET=vertbacon-prod-signer-2026
 ENV APEX_API_BASE=https://omni.apex.exchange
-ENV SIGNER_URL=http://localhost:8099   # bot will talk to signer via localhost
+ENV SIGNER_URL=http://localhost:8099
 
-# Run supervisor to manage both processes
 CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
