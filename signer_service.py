@@ -205,7 +205,24 @@ def _sign_withdrawal_zk(seeds: str, account_id: str, nonce: int, asset_id: int, 
     return auth_data.signature
 
 
-# ---------- Health ----------
+# ---------- Root & Health ----------
+@app.get("/")
+async def root():
+    return {
+        "service": "ApeX ZK Signer",
+        "version": "2.1.0",
+        "endpoints": [
+            "/health",
+            "/sign-order",
+            "/transfer",
+            "/withdraw",
+            "/cancel-all"
+        ],
+        "docs": "/docs",
+        "status": "operational"
+    }
+
+
 @app.get("/health")
 async def health():
     return {
@@ -216,7 +233,7 @@ async def health():
     }
 
 
-# ---------- Sign Order (unchanged) ----------
+# ---------- Sign Order ----------
 @app.post("/sign-order")
 async def sign_order(req: OrderRequest):
     _verify_token(req.signer_token)
