@@ -8,7 +8,8 @@ This service mirrors CCXT's `apex.create_order` + `get_zk_contract_signature_obj
 implementations EXACTLY so ApeX accepts the ZK signature.
 Extended to support transfers, withdrawals, and cancel-all.
 """
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
+from fastapi.routing import APIRoute
 from pydantic import BaseModel
 from typing import Optional, Dict, Any, List
 import hmac
@@ -205,7 +206,7 @@ def _sign_withdrawal_zk(seeds: str, account_id: str, nonce: int, asset_id: int, 
     return auth_data.signature
 
 
-# ---------- Root & Health ----------
+# ---------- Root & Health (with HEAD support) ----------
 @app.get("/")
 async def root():
     return {
@@ -223,6 +224,12 @@ async def root():
     }
 
 
+@app.head("/")
+async def root_head():
+    """HEAD request support for health checks."""
+    return Response(headers={"Content-Type": "application/json"})
+
+
 @app.get("/health")
 async def health():
     return {
@@ -231,6 +238,12 @@ async def health():
         "version": "2.1.0",
         "api_base": APEX_API_BASE,
     }
+
+
+@app.head("/health")
+async def health_head():
+    """HEAD request support for health checks."""
+    return Response(headers={"Content-Type": "application/json"})
 
 
 # ---------- Sign Order ----------
