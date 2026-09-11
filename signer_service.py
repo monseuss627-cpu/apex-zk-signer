@@ -6,10 +6,9 @@ Called via HTTP from the main VertBacon app.
 
 This service mirrors CCXT's `apex.create_order` + `get_zk_contract_signature_obj`
 implementations EXACTLY so ApeX accepts the ZK signature.
-Extended to support transfers, withdrawals, and cancel-all.
+Extended to support transfers, withdrawals, cancel-all, and enriched PnL records.
 """
-from fastapi import FastAPI, HTTPException, Response
-from fastapi.routing import APIRoute
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import Optional, Dict, Any, List
 import hmac
@@ -63,6 +62,9 @@ class OrderRequest(BaseModel):
     signer_token: str
     reduce_only: bool = False
     time_in_force: str = "GOOD_TIL_CANCEL"
+    client_id: Optional[str] = None
+    client_group_id: Optional[str] = None
+    client_schedule_id: Optional[str] = None
 
 
 class WithdrawRequest(BaseModel):
@@ -92,8 +94,94 @@ class CancelAllRequest(BaseModel):
     api_key: str
     api_secret: str
     passphrase: str
-    seeds: str          # needed to sign close orders
+    seeds: str
     signer_token: str
+    client_id: Optional[str] = None
+    client_group_id: Optional[str] = None
+    client_schedule_id: Optional[str] = None
+
+
+# ---------- PnL Request Models ----------
+class EquityRefreshRequest(BaseModel):
+    api_key: str
+    api_secret: str
+    passphrase: str
+    signer_token: str
+
+
+class EntrySnapshotRequest(BaseModel):
+    api_key: str
+    api_secret: str
+    passphrase: str
+    signer_token: str
+    client_id: str
+    client_group_id: Optional[str] = None
+    client_schedule_id: Optional[str] = None
+    symbol: Optional[str] = None
+    order_id: Optional[str] = None
+    client_order_id: Optional[str] = None
+    side: Optional[str] = None
+    size: Optional[str] = None
+    event_type: str = "ENTRY"          # ENTRY | INCREASE | OPEN
+
+
+class CancelSnapshotRequest(BaseModel):
+    api_key: str
+    api_secret: str
+    passphrase: str
+    signer_token: str
+    client_id: str
+    client_group_id: Optional[str] = None
+    client_schedule_id: Optional[str] = None
+    order_id: Optional[str] = None
+    client_order_id: Optional[str] = None
+    symbol: Optional[str] = None
+    cancel_reason: Optional[str] = None
+
+
+class PositionDetailsRequest(BaseModel):
+    api_key: str
+    api_secret: str
+    passphrase: str
+    signer_token: str
+    client_id: str
+    client_group_id: Optional[str] = None
+    client_schedule_id: Optional[str] = None
+    symbols: Optional[List[str]] = None    # filter, None = all
+
+
+class OrderHistoryRequest(BaseModel):
+    api_key: str
+    api_secret: str
+    passphrase: str
+    signer_token: str
+    client_id: str
+    client_group_id: Optional[str] = None
+    client_schedule_id: Optional[str] = None
+    symbol: Optional[str] = None
+    begin_time: Optional[int] = None       # ms epoch
+    end_time: Optional[int] = None         # ms epoch
+    limit: int = 100
+    page: int = 1
+
+
+class HistoricalPnlRequest(BaseModel):
+    api_key: str
+    api_secret: str
+    passphrase: str
+    signer_token: str
+    client_id: str
+    client_group_id: Optional[str] = None
+    client_schedule_id: Optional[str] = None
+    begin_time: Optional[int] = None
+    end_time: Optional[int] = None
+    limit: int = 100
+    page: int = 1
+
+
+# ---------- In-memory equity cache ----------
+# keyed by api_key -> { totalEquityValue, availableBalance, ts }
+_EQUITY_CACHE: Dict[str, Dict[str, Any]] = {}
 
 
 # ---------- Helpers ----------
@@ -206,36 +294,131 @@ def _sign_withdrawal_zk(seeds: str, account_id: str, nonce: int, asset_id: int, 
     return auth_data.signature
 
 
-# ---------- Root & Health (with HEAD support via app.api_route) ----------
-# Use api_route to handle all methods for root
-@app.api_route("/", methods=["GET", "HEAD"])
-async def root():
+# ---------- PnL Helpers ----------
+def _auth_headers(api_key: str, passphrase: str, method: str, path: str,
+                  body: str, api_secret: str) -> Dict[str, str]:
+    """Build signed ApeX auth headers for any private endpoint."""
+    ts = str(int(time.time() * 1000))
+    msg = ts + method + path + body
+    sig = _hmac_sign(msg, api_secret)
+    headers = {
+        "APEX-API-KEY": api_key,
+        "APEX-PASSPHRASE": passphrase,
+        "APEX-TIMESTAMP": ts,
+        "APEX-SIGNATURE": sig,
+        "User-Agent": "apex-CCXT",
+        "Accept": "application/json",
+    }
+    if body:
+        headers["Content-Type"] = "application/x-www-form-urlencoded"
+    return headers
+
+
+async def _fetch_account_balance(client: httpx.AsyncClient, api_key: str,
+                                 api_secret: str, passphrase: str) -> Dict[str, Any]:
+    """
+    GET /api/v3/account-balance
+    Returns authentic broker equity: totalEquityValue, availableBalance,
+    initial/maintenance margin, etc.
+    """
+    path = "/api/v3/account-balance"
+    headers = _auth_headers(api_key, passphrase, "GET", path, "", api_secret)
+    resp = await client.get(f"{APEX_API_BASE}{path}", headers=headers)
+    try:
+        data = resp.json()
+    except Exception:
+        data = {"raw": resp.text[:500]}
+    return {"status_code": resp.status_code, "data": data}
+
+
+async def _fetch_account(client: httpx.AsyncClient, api_key: str,
+                         api_secret: str, passphrase: str) -> Dict[str, Any]:
+    """
+    GET /api/v3/account
+    Returns accountId, contractAccount, contractWallets, positions.
+    """
+    path = "/api/v3/account"
+    headers = _auth_headers(api_key, passphrase, "GET", path, "", api_secret)
+    resp = await client.get(f"{APEX_API_BASE}{path}", headers=headers)
+    try:
+        data = resp.json()
+    except Exception:
+        data = {"raw": resp.text[:500]}
+    return {"status_code": resp.status_code, "data": data}
+
+
+def _extract_equity(balance_resp: Dict[str, Any]) -> Dict[str, Any]:
+    """Pull equity fields out of /api/v3/account-balance response."""
+    body = balance_resp.get("data") or {}
+    d = body.get("data") if isinstance(body, dict) else None
+    if not isinstance(d, dict):
+        d = body if isinstance(body, dict) else {}
     return {
-        "service": "ApeX ZK Signer",
-        "version": "2.1.0",
-        "endpoints": [
-            "/health",
-            "/sign-order",
-            "/transfer",
-            "/withdraw",
-            "/cancel-all"
-        ],
-        "docs": "/docs",
-        "status": "operational"
+        "totalEquityValue": d.get("totalEquityValue"),
+        "availableBalance": d.get("availableBalance"),
+        "initialMargin": d.get("initialMargin") or d.get("totalInitialMargin"),
+        "maintenanceMargin": d.get("maintenanceMargin") or d.get("totalMaintenanceMargin"),
+        "raw": d,
     }
 
 
-@app.api_route("/health", methods=["GET", "HEAD"])
+def _normalize_positions(account_resp: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Pull positions array out of /api/v3/account response."""
+    body = account_resp.get("data") or {}
+    d = body.get("data") if isinstance(body, dict) else None
+    if not isinstance(d, dict):
+        d = body if isinstance(body, dict) else {}
+    positions = d.get("positions") or d.get("openPositions") or []
+    normalized = []
+    for p in positions:
+        if not isinstance(p, dict):
+            continue
+        size = p.get("size")
+        try:
+            size_f = float(size) if size not in (None, "") else 0.0
+        except (TypeError, ValueError):
+            size_f = 0.0
+        if size_f == 0.0:
+            continue
+        normalized.append({
+            "symbol": p.get("symbol"),
+            "side": p.get("side"),
+            "size": p.get("size"),
+            "entryPrice": p.get("entryPrice"),
+            "exitPrice": p.get("exitPrice"),
+            "fee": p.get("fee"),
+            "fundingFee": p.get("fundingFee"),
+            "customInitialMarginRate": p.get("customInitialMarginRate"),
+            "createdAt": p.get("createdAt"),
+            "updatedTime": p.get("updatedTime") or p.get("updatedAt"),
+            "lightNumbers": p.get("lightNumbers"),
+        })
+    return normalized
+
+
+def _tag(client_id: str, group_id: Optional[str],
+         schedule_id: Optional[str]) -> Dict[str, Any]:
+    """Application-level attribution tags echoed back in every record."""
+    return {
+        "client_id": client_id,
+        "client_group_id": group_id,
+        "client_schedule_id": schedule_id,
+    }
+
+
+# ---------- Health ----------
+@app.get("/health")
 async def health():
     return {
         "status": "ok",
         "zklink_sdk_loaded": zklink_sdk is not None,
-        "version": "2.1.0",
+        "version": "2.2.0",
         "api_base": APEX_API_BASE,
+        "equity_cache_entries": len(_EQUITY_CACHE),
     }
 
 
-# ---------- Sign Order ----------
+# ---------- Sign Order (extended to cache equity + return tags) ----------
 @app.post("/sign-order")
 async def sign_order(req: OrderRequest):
     _verify_token(req.signer_token)
@@ -273,6 +456,19 @@ async def sign_order(req: OrderRequest):
         if not account_id:
             return {"error": "accountId missing in /v3/account response"}
         account_id = str(account_id)
+
+        # Opportunistically capture pre-trade equity for downstream PnL attribution
+        try:
+            pre_balance = await _fetch_account_balance(client, req.api_key,
+                                                       req.api_secret, req.passphrase)
+            eq = _extract_equity(pre_balance)
+            _EQUITY_CACHE[req.api_key] = {
+                "totalEquityValue": eq.get("totalEquityValue"),
+                "availableBalance": eq.get("availableBalance"),
+                "ts": int(time.time() * 1000),
+            }
+        except Exception as e:
+            logger.warning("Pre-trade equity fetch failed: %s", e)
 
         order_size = _amount_to_precision(req.size, size_step)
         order_price = _price_to_precision(req.price, price_step)
@@ -365,6 +561,17 @@ async def sign_order(req: OrderRequest):
                 "symbol": req.symbol,
                 "side": req.side,
                 "type": "market",
+                "client_order_id": client_order_id,
+                "broker": {
+                    "createdAt": info.get("createdAt"),
+                    "updatedTime": info.get("updatedTime"),
+                    "status": info.get("status"),
+                    "fee": info.get("fee"),
+                    "fundingFee": info.get("fundingFee"),
+                },
+                "attribution": _tag(req.client_id or "",
+                                    req.client_group_id,
+                                    req.client_schedule_id),
             }
 
         return {
@@ -372,6 +579,9 @@ async def sign_order(req: OrderRequest):
             "code": result.get("code"),
             "key": result.get("key"),
             "detail": result.get("detail"),
+            "attribution": _tag(req.client_id or "",
+                                req.client_group_id,
+                                req.client_schedule_id),
         }
 
 
@@ -451,13 +661,11 @@ async def withdraw(req: WithdrawRequest):
         if not account_id:
             return {"error": "accountId missing in /v3/account response"}
 
-        # Asset ID mapping (extend as needed)
         asset_id_map = {"USDT": 0, "BTC": 1, "ETH": 2, "SOL": 3}
         asset_id = asset_id_map.get(req.asset.upper())
         if asset_id is None:
             return {"error": f"Unsupported asset: {req.asset}"}
 
-        # Scale amount to 18 decimals
         amount_scaled = (Decimal(req.amount) * Decimal(10) ** Decimal("18")).quantize(Decimal(0), rounding="ROUND_DOWN")
         amount_str = str(amount_scaled)
 
@@ -521,26 +729,16 @@ async def cancel_all(req: CancelAllRequest):
         "orders_failed": 0,
         "positions_closed": 0,
         "positions_failed": 0,
-        "errors": []
+        "errors": [],
+        "attribution": _tag(req.client_id or "",
+                            req.client_group_id,
+                            req.client_schedule_id),
     }
 
     async with httpx.AsyncClient(timeout=30) as client:
-        # Helper to sign and get headers
         def sign_and_headers(method: str, path: str, body: str = ""):
-            ts = str(int(time.time() * 1000))
-            msg = ts + method + path + body
-            sig = _hmac_sign(msg, req.api_secret)
-            headers = {
-                "APEX-API-KEY": req.api_key,
-                "APEX-PASSPHRASE": req.passphrase,
-                "APEX-TIMESTAMP": ts,
-                "APEX-SIGNATURE": sig,
-                "User-Agent": "apex-CCXT",
-                "Accept": "application/json",
-            }
-            if body:
-                headers["Content-Type"] = "application/x-www-form-urlencoded"
-            return headers
+            return _auth_headers(req.api_key, req.passphrase, method, path,
+                                 body, req.api_secret)
 
         # 1) Cancel open orders
         path_orders = "/api/v3/orders?status=OPEN"
@@ -563,13 +761,11 @@ async def cancel_all(req: CancelAllRequest):
                     results["orders_failed"] += 1
                     results["errors"].append(f"Cancel order {order_id} failed: {resp_del.text[:200]}")
 
-        # 2) Close open positions (requires accountId and ZK signing)
-        # Fetch accountId
+        # 2) Close open positions
         h = sign_and_headers("GET", "/api/v3/account")
         resp_acc = await client.get(f"{APEX_API_BASE}/api/v3/account", headers=h)
         if resp_acc.status_code != 200:
             results["errors"].append(f"Failed to get account: {resp_acc.text[:200]}")
-            # We still return results; positions won't be closed.
             return results
         account_id = resp_acc.json().get("data", {}).get("id")
         if not account_id:
@@ -577,7 +773,6 @@ async def cancel_all(req: CancelAllRequest):
             return results
         account_id = str(account_id)
 
-        # Fetch positions
         h = sign_and_headers("GET", "/api/v3/positions")
         resp_pos = await client.get(f"{APEX_API_BASE}/api/v3/positions", headers=h)
         if resp_pos.status_code != 200:
@@ -592,12 +787,10 @@ async def cancel_all(req: CancelAllRequest):
             symbol = pos.get("symbol")
             if not symbol:
                 continue
-            # Determine opposite side
             side = "SELL" if pos["side"].upper() == "LONG" else "BUY"
             sym_info = SYMBOL_INFO.get(symbol) or SYMBOL_INFO["BTC-USDT"]
             size_step = sym_info["size_step"]
             close_size = _amount_to_precision(abs(float(size)), size_step)
-            # Get current price for this symbol
             h = sign_and_headers("GET", f"/api/v3/ticker?symbol={symbol}")
             resp_tick = await client.get(f"{APEX_API_BASE}/api/v3/ticker?symbol={symbol}", headers=h)
             if resp_tick.status_code != 200:
@@ -613,7 +806,6 @@ async def cancel_all(req: CancelAllRequest):
             price_step = sym_info["price_step"]
             close_price = _price_to_precision(float(last_price), price_step)
 
-            # Build order signature
             client_order_id = _generate_random_client_id_omni(account_id)
             taker = "0.0005"
             maker = "0.0002"
@@ -635,7 +827,6 @@ async def cancel_all(req: CancelAllRequest):
                 results["positions_failed"] += 1
                 continue
 
-            # Submit close order (market)
             time_now_ms = int(time.time() * 1000)
             expiration = int(math.floor(time_now_ms / 1000 + 30 * 24 * 60 * 60))
             fee_val = (Decimal(close_price) * Decimal(close_size) * Decimal(taker)) + Decimal(price_step)
@@ -654,7 +845,7 @@ async def cancel_all(req: CancelAllRequest):
                 "clientId": client_order_id,
                 "brokerId": "6956",
                 "signature": signature,
-                "reduceOnly": "true",      # ensure we only close
+                "reduceOnly": "true",
             }
             sorted_body = dict(sorted(body.items()))
             sign_body = urlencode(sorted_body)
@@ -672,6 +863,290 @@ async def cancel_all(req: CancelAllRequest):
                 results["errors"].append(f"Close position {symbol} failed: {resp_order.text[:200]}")
 
     return results
+
+
+# ============================================================
+# ENRICHED PnL ENDPOINTS
+# All data is authentic broker data pulled from ApeX REST APIs.
+# The caller's client/group/schedule IDs are echoed back so the
+# application can persist them alongside the broker data.
+# ============================================================
+
+@app.post("/pnl/refresh-equity")
+async def pnl_refresh_equity(req: EquityRefreshRequest):
+    """
+    Refresh the in-memory equity cache for this API key.
+    Calls GET /api/v3/account-balance for authoritative totalEquityValue.
+    """
+    _verify_token(req.signer_token)
+    async with httpx.AsyncClient(timeout=20) as client:
+        balance = await _fetch_account_balance(client, req.api_key,
+                                               req.api_secret, req.passphrase)
+        eq = _extract_equity(balance)
+        ts = int(time.time() * 1000)
+        _EQUITY_CACHE[req.api_key] = {
+            "totalEquityValue": eq.get("totalEquityValue"),
+            "availableBalance": eq.get("availableBalance"),
+            "ts": ts,
+        }
+        return {
+            "status": "ok",
+            "ts": ts,
+            "totalEquityValue": eq.get("totalEquityValue"),
+            "availableBalance": eq.get("availableBalance"),
+            "initialMargin": eq.get("initialMargin"),
+            "maintenanceMargin": eq.get("maintenanceMargin"),
+            "status_code": balance.get("status_code"),
+        }
+
+
+@app.post("/pnl/entry-snapshot")
+async def pnl_entry_snapshot(req: EntrySnapshotRequest):
+    """
+    Snapshot on entry: broker equity + timestamp + position state.
+    Call immediately before submitting an order, or on the first WS
+    confirmation that the order is OPEN / filled.
+    """
+    _verify_token(req.signer_token)
+
+    async with httpx.AsyncClient(timeout=20) as client:
+        # Parallel fetch: equity + full account (positions)
+        balance_task = _fetch_account_balance(client, req.api_key,
+                                              req.api_secret, req.passphrase)
+        account_task = _fetch_account(client, req.api_key,
+                                      req.api_secret, req.passphrase)
+        balance_resp, account_resp = await asyncio_gather(balance_task, account_task)
+
+    eq = _extract_equity(balance_resp)
+    positions = _normalize_positions(account_resp)
+    if req.symbol:
+        positions = [p for p in positions if p.get("symbol") == req.symbol]
+
+    ts = int(time.time() * 1000)
+    _EQUITY_CACHE[req.api_key] = {
+        "totalEquityValue": eq.get("totalEquityValue"),
+        "availableBalance": eq.get("availableBalance"),
+        "ts": ts,
+    }
+
+    return {
+        "event_type": req.event_type,
+        "broker": {
+            "timestamp_ms": ts,
+            "totalEquityValue": eq.get("totalEquityValue"),
+            "availableBalance": eq.get("availableBalance"),
+            "initialMargin": eq.get("initialMargin"),
+            "maintenanceMargin": eq.get("maintenanceMargin"),
+        },
+        "order": {
+            "order_id": req.order_id,
+            "client_order_id": req.client_order_id,
+            "symbol": req.symbol,
+            "side": req.side,
+            "size": req.size,
+        },
+        "positions": positions,
+        "attribution": _tag(req.client_id, req.client_group_id,
+                            req.client_schedule_id),
+        "raw_account_status": account_resp.get("status_code"),
+        "raw_balance_status": balance_resp.get("status_code"),
+    }
+
+
+@app.post("/pnl/cancel-snapshot")
+async def pnl_cancel_snapshot(req: CancelSnapshotRequest):
+    """
+    Snapshot on cancel: broker equity + timestamp + residual position state.
+    Call when an order reaches CANCELED (WS order update or confirmed cancel).
+    """
+    _verify_token(req.signer_token)
+
+    async with httpx.AsyncClient(timeout=20) as client:
+        balance_task = _fetch_account_balance(client, req.api_key,
+                                              req.api_secret, req.passphrase)
+        account_task = _fetch_account(client, req.api_key,
+                                      req.api_secret, req.passphrase)
+        balance_resp, account_resp = await asyncio_gather(balance_task, account_task)
+
+    eq = _extract_equity(balance_resp)
+    positions = _normalize_positions(account_resp)
+    if req.symbol:
+        positions = [p for p in positions if p.get("symbol") == req.symbol]
+
+    ts = int(time.time() * 1000)
+    _EQUITY_CACHE[req.api_key] = {
+        "totalEquityValue": eq.get("totalEquityValue"),
+        "availableBalance": eq.get("availableBalance"),
+        "ts": ts,
+    }
+
+    return {
+        "event_type": "CANCEL",
+        "broker": {
+            "timestamp_ms": ts,
+            "totalEquityValue": eq.get("totalEquityValue"),
+            "availableBalance": eq.get("availableBalance"),
+            "initialMargin": eq.get("initialMargin"),
+            "maintenanceMargin": eq.get("maintenanceMargin"),
+        },
+        "order": {
+            "order_id": req.order_id,
+            "client_order_id": req.client_order_id,
+            "symbol": req.symbol,
+            "cancel_reason": req.cancel_reason,
+        },
+        "residual_positions": positions,
+        "attribution": _tag(req.client_id, req.client_group_id,
+                            req.client_schedule_id),
+    }
+
+
+@app.post("/pnl/position-details")
+async def pnl_position_details(req: PositionDetailsRequest):
+    """
+    Return full broker position details: side, size, entryPrice, exitPrice,
+    fee, fundingFee, customInitialMarginRate, timestamps, etc.
+    """
+    _verify_token(req.signer_token)
+
+    async with httpx.AsyncClient(timeout=20) as client:
+        account_resp = await _fetch_account(client, req.api_key,
+                                            req.api_secret, req.passphrase)
+
+    positions = _normalize_positions(account_resp)
+    if req.symbols:
+        wanted = set(req.symbols)
+        positions = [p for p in positions if p.get("symbol") in wanted]
+
+    return {
+        "broker_timestamp_ms": int(time.time() * 1000),
+        "positions": positions,
+        "attribution": _tag(req.client_id, req.client_group_id,
+                            req.client_schedule_id),
+    }
+
+
+@app.post("/pnl/order-history")
+async def pnl_order_history(req: OrderHistoryRequest):
+    """
+    Backfill order lifecycle timestamps and statuses.
+    GET /api/v3/order-history with time range + pagination.
+    """
+    _verify_token(req.signer_token)
+
+    query: Dict[str, Any] = {"limit": req.limit, "page": req.page}
+    if req.symbol:
+        query["symbol"] = req.symbol
+    if req.begin_time:
+        query["beginTime"] = req.begin_time
+    if req.end_time:
+        query["endTime"] = req.end_time
+    sorted_query = dict(sorted(query.items()))
+    query_str = urlencode(sorted_query)
+    path = f"/api/v3/order-history?{query_str}"
+
+    async with httpx.AsyncClient(timeout=20) as client:
+        headers = _auth_headers(req.api_key, req.passphrase, "GET", path,
+                                "", req.api_secret)
+        resp = await client.get(f"{APEX_API_BASE}{path}", headers=headers)
+        try:
+            data = resp.json()
+        except Exception:
+            data = {"raw": resp.text[:500]}
+
+    orders = data.get("data", []) if isinstance(data, dict) else []
+    enriched = []
+    for o in orders:
+        if not isinstance(o, dict):
+            continue
+        enriched.append({
+            "order_id": o.get("id"),
+            "client_order_id": o.get("clientId") or o.get("clientOrderId"),
+            "symbol": o.get("symbol"),
+            "side": o.get("side"),
+            "type": o.get("type"),
+            "size": o.get("size"),
+            "price": o.get("price"),
+            "status": o.get("status"),
+            "createdAt": o.get("createdAt"),
+            "updatedTime": o.get("updatedTime") or o.get("updatedAt"),
+            "expiresAt": o.get("expiresAt") or o.get("expiration"),
+            "filledSize": o.get("filledSize"),
+            "avgFillPrice": o.get("avgFillPrice"),
+            "fee": o.get("fee"),
+            "fundingFee": o.get("fundingFee"),
+            "reduceOnly": o.get("reduceOnly"),
+            "cancelReason": o.get("cancelReason"),
+        })
+
+    return {
+        "broker_timestamp_ms": int(time.time() * 1000),
+        "orders": enriched,
+        "pagination": {"limit": req.limit, "page": req.page,
+                       "count": len(enriched)},
+        "attribution": _tag(req.client_id, req.client_group_id,
+                            req.client_schedule_id),
+    }
+
+
+@app.post("/pnl/historical-pnl")
+async def pnl_historical_pnl(req: HistoricalPnlRequest):
+    """
+    Backfill realized/unrealized PnL from ApeX historical PnL endpoint.
+    """
+    _verify_token(req.signer_token)
+
+    query: Dict[str, Any] = {"limit": req.limit, "page": req.page}
+    if req.begin_time:
+        query["beginTime"] = req.begin_time
+    if req.end_time:
+        query["endTime"] = req.end_time
+    sorted_query = dict(sorted(query.items()))
+    query_str = urlencode(sorted_query)
+    path = f"/api/v3/historical-pnl?{query_str}"
+
+    async with httpx.AsyncClient(timeout=20) as client:
+        headers = _auth_headers(req.api_key, req.passphrase, "GET", path,
+                                "", req.api_secret)
+        resp = await client.get(f"{APEX_API_BASE}{path}", headers=headers)
+        try:
+            data = resp.json()
+        except Exception:
+            data = {"raw": resp.text[:500]}
+
+    records = data.get("data", []) if isinstance(data, dict) else []
+    enriched = []
+    for r in records:
+        if not isinstance(r, dict):
+            continue
+        enriched.append({
+            "symbol": r.get("symbol"),
+            "side": r.get("side"),
+            "size": r.get("size"),
+            "entryPrice": r.get("entryPrice"),
+            "exitPrice": r.get("exitPrice"),
+            "realizedPnl": r.get("realizedPnl") or r.get("pnl"),
+            "fee": r.get("fee"),
+            "fundingFee": r.get("fundingFee"),
+            "createdAt": r.get("createdAt"),
+            "updatedTime": r.get("updatedTime") or r.get("updatedAt"),
+            "orderId": r.get("orderId"),
+        })
+
+    return {
+        "broker_timestamp_ms": int(time.time() * 1000),
+        "pnl_records": enriched,
+        "pagination": {"limit": req.limit, "page": req.page,
+                       "count": len(enriched)},
+        "attribution": _tag(req.client_id, req.client_group_id,
+                            req.client_schedule_id),
+    }
+
+
+# Small helper so we can run two coroutines concurrently without extra imports
+async def asyncio_gather(*coros):
+    import asyncio
+    return await asyncio.gather(*coros)
 
 
 if __name__ == "__main__":
