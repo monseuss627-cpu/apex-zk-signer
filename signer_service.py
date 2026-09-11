@@ -406,7 +406,35 @@ def _tag(client_id: str, group_id: Optional[str],
     }
 
 
-# ---------- Health ----------
+# ---------- Root & Health (platform probes) ----------
+@app.get("/")
+@app.head("/")
+async def root():
+    """
+    Root endpoint for platform health checks (Render, Fly, Railway, etc.).
+    Returns 200 for both GET and HEAD so deploy probes pass.
+    """
+    return {
+        "service": "apex-zk-signer",
+        "status": "ok",
+        "zklink_sdk_loaded": zklink_sdk is not None,
+        "version": "2.2.0",
+        "endpoints": [
+            "/health",
+            "/sign-order",
+            "/transfer",
+            "/withdraw",
+            "/cancel-all",
+            "/pnl/refresh-equity",
+            "/pnl/entry-snapshot",
+            "/pnl/cancel-snapshot",
+            "/pnl/position-details",
+            "/pnl/order-history",
+            "/pnl/historical-pnl",
+        ],
+    }
+
+
 @app.get("/health")
 async def health():
     return {
@@ -416,6 +444,12 @@ async def health():
         "api_base": APEX_API_BASE,
         "equity_cache_entries": len(_EQUITY_CACHE),
     }
+
+
+@app.head("/health")
+async def health_head():
+    """Explicit HEAD handler for /health so platform probes always get 200."""
+    return {}
 
 
 # ---------- Sign Order (extended to cache equity + return tags) ----------
